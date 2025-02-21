@@ -1,4 +1,4 @@
-#   Copyright 2020 The PyMC Developers
+#   Copyright 2024 - present The PyMC Developers
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
@@ -12,13 +12,12 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-"""NumPy array trace backend
+"""NumPy array trace backend.
 
 Store sampling values in memory as a NumPy array.
 """
 
-
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import numpy as np
 
@@ -28,7 +27,7 @@ from pymc.model import Model, modelcontext
 
 
 class NDArray(base.BaseTrace):
-    """NDArray trace object
+    """NDArray trace object.
 
     Parameters
     ----------
@@ -41,10 +40,8 @@ class NDArray(base.BaseTrace):
         `model.unobserved_RVs` is used.
     """
 
-    supports_sampler_stats = True
-
-    def __init__(self, name=None, model=None, vars=None, test_point=None):
-        super().__init__(name, model, vars, test_point)
+    def __init__(self, name=None, model=None, vars=None, test_point=None, **kwargs):
+        super().__init__(name, model, vars, test_point, **kwargs)
         self.draw_idx = 0
         self.draws = None
         self.samples = {}
@@ -74,12 +71,12 @@ class NDArray(base.BaseTrace):
             self.draw_idx = old_draws
             for varname, shape in self.var_shapes.items():
                 old_var_samples = self.samples[varname]
-                new_var_samples = np.zeros((draws,) + shape, self.var_dtypes[varname])
+                new_var_samples = np.zeros((draws, *shape), self.var_dtypes[varname])
                 self.samples[varname] = np.concatenate((old_var_samples, new_var_samples), axis=0)
         else:  # Otherwise, make array of zeros for each variable.
             self.draws = draws
             for varname, shape in self.var_shapes.items():
-                self.samples[varname] = np.zeros((draws,) + shape, dtype=self.var_dtypes[varname])
+                self.samples[varname] = np.empty((draws, *shape), dtype=self.var_dtypes[varname])
 
         if sampler_vars is None:
             return
@@ -87,7 +84,7 @@ class NDArray(base.BaseTrace):
         if self._stats is None:
             self._stats = []
             for sampler in sampler_vars:
-                data = dict()  # type: Dict[str, np.ndarray]
+                data: dict[str, np.ndarray] = {}
                 self._stats.append(data)
                 for varname, dtype in sampler.items():
                     data[varname] = np.zeros(draws, dtype=dtype)
@@ -95,7 +92,6 @@ class NDArray(base.BaseTrace):
             for data, vars in zip(self._stats, sampler_vars):
                 if vars.keys() != data.keys():
                     raise ValueError("Sampler vars can't change")
-                old_draws = len(self)
                 for varname, dtype in vars.items():
                     old = data[varname]
                     new = np.zeros(draws, dtype=dtype)
@@ -109,20 +105,23 @@ class NDArray(base.BaseTrace):
         point: dict
             Values mapped to variable names
         """
-        for varname, value in zip(self.varnames, self.fn(point)):
-            self.samples[varname][self.draw_idx] = value
+        samples = self.samples
+        draw_idx = self.draw_idx
+        for varname, value in zip(self.varnames, self.fn(*point.values())):
+            samples[varname][draw_idx] = value
 
-        if self._stats is not None and sampler_stats is None:
-            raise ValueError("Expected sampler_stats")
-        if self._stats is None and sampler_stats is not None:
-            raise ValueError("Unknown sampler_stats")
         if sampler_stats is not None:
             for data, vars in zip(self._stats, sampler_stats):
                 for key, val in vars.items():
-                    data[key][self.draw_idx] = val
+                    data[key][draw_idx] = val
+        elif self._stats is not None:
+            raise ValueError("Expected sampler_stats")
+
         self.draw_idx += 1
 
-    def _get_sampler_stats(self, varname, sampler_idx, burn, thin):
+    def _get_sampler_stats(
+        self, varname: str, sampler_idx: int, burn: int, thin: int
+    ) -> np.ndarray:
         return self._stats[sampler_idx][varname][burn::thin]
 
     def close(self):
@@ -140,6 +139,7 @@ class NDArray(base.BaseTrace):
     # Selection methods
 
     def __len__(self):
+        """Length of the chain."""
         if not self.samples:  # `setup` has not been called.
             return 0
         return self.draw_idx
@@ -159,7 +159,7 @@ class NDArray(base.BaseTrace):
         """
         return self.samples[varname][burn::thin]
 
-    def _slice(self, idx):
+    def _slice(self, idx: slice):
         # Slicing directly instead of using _slice_as_ndarray to
         # support stop value in slice (which is needed by
         # iter_sample).
@@ -167,7 +167,13 @@ class NDArray(base.BaseTrace):
         # Only the first `draw_idx` value are valid because of preallocation
         idx = slice(*idx.indices(len(self)))
 
-        sliced = NDArray(model=self.model, vars=self.vars)
+        sliced = type(self)(
+            model=self.model,
+            vars=self.vars,
+            fn=self.fn,
+            var_shapes=self.var_shapes,
+            var_dtypes=self.var_dtypes,
+        )
         sliced.chain = self.chain
         sliced.samples = {varname: values[idx] for varname, values in self.samples.items()}
         sliced.sampler_vars = self.sampler_vars
@@ -177,16 +183,20 @@ class NDArray(base.BaseTrace):
             return sliced
         sliced._stats = []
         for vars in self._stats:
-            var_sliced = {}
+            var_sliced: dict[str, np.ndarray] = {}
             sliced._stats.append(var_sliced)
             for key, vals in vars.items():
                 var_sliced[key] = vals[idx]
 
         return sliced
 
-    def point(self, idx) -> Dict[str, Any]:
-        """Return dictionary of point values at `idx` for current chain
-        with variable names as keys.
+    def point(self, idx) -> dict[str, Any]:
+        """Return point values at `idx` for current chain.
+
+        Returns
+        -------
+        values : dict[str, Any]
+            Dictionary of values with variable names as keys.
         """
         idx = int(idx)
         return {varname: values[idx] for varname, values in self.samples.items()}
@@ -212,14 +222,15 @@ def _slice_as_ndarray(strace, idx):
 
 
 def point_list_to_multitrace(
-    point_list: List[Dict[str, np.ndarray]], model: Optional[Model] = None
+    point_list: list[dict[str, np.ndarray]], model: Model | None = None
 ) -> MultiTrace:
-    """transform point list into MultiTrace"""
+    """Transform point list into MultiTrace."""
     _model = modelcontext(model)
     varnames = list(point_list[0].keys())
     with _model:
         chain = NDArray(model=_model, vars=[_model[vn] for vn in varnames])
         chain.setup(draws=len(point_list), chain=0)
+
         # since we are simply loading a trace by hand, we need only a vacuous function for
         # chain.record() to use. This crushes the default.
         def point_fun(point):

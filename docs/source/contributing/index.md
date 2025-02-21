@@ -34,6 +34,7 @@ If you have other ideas let us know on [Discourse](https://discourse.pymc.io/) t
   companies, to people who could use PyMC in their work or making sure that academics who use PyMC
   cite it correctly in their work
 * Help with our fundraising efforts
+* Add timestamps to [videos from PyMCon](https://github.com/pymc-devs/video-timestamps)
 
 ### Contribute via Pull Requests on GitHub
 We have a {ref}`pr_tutorial` and a {ref}`pr_checklist` page to help in all the steps of the contributing
@@ -90,10 +91,12 @@ pr_tutorial
 :maxdepth: 1
 :caption: How-to guides
 
-developer_guide_implementing_distribution
 build_docs
+docker_container
 running_the_test_suite
 review_pr_pymc_examples
+using_gitpod
+implementing_distribution
 :::
 
 :::{toctree}
@@ -101,7 +104,6 @@ review_pr_pymc_examples
 :maxdepth: 1
 :caption: Reference content
 
-private_api/index
 python_style
 jupyter_style
 pr_checklist
@@ -114,5 +116,5 @@ release_checklist
 :maxdepth: 1
 :caption: In depth explanations
 
-developer_guide
+versioning_schemes_explanation
 :::

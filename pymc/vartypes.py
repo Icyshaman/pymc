@@ -1,4 +1,4 @@
-#   Copyright 2020 The PyMC Developers
+#   Copyright 2024 - present The PyMC Developers
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
@@ -14,13 +14,13 @@
 
 __all__ = [
     "bool_types",
-    "int_types",
-    "float_types",
     "complex_types",
     "continuous_types",
     "discrete_types",
-    "typefilter",
+    "float_types",
+    "int_types",
     "isgenerator",
+    "typefilter",
 ]
 
 bool_types = {"int8"}

@@ -10,6 +10,4 @@ Data
    MutableData
    get_data
    Data
-   GeneratorAdapter
    Minibatch
-   align_minibatches

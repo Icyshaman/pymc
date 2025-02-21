@@ -1,0 +1,33 @@
+name: mypy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+defaults:
+  run:
+    shell: bash -leo pipefail {0}
+jobs:
+  mypy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-file: conda-envs/environment-test.yml
+          create-args: >-
+            python=3.10
+          environment-name: pymc-test
+          init-shell: bash
+          cache-environment: true
+      - name: Install-pymc and mypy dependencies
+        run: |
+          pip install -e .
+          pip install --pre -U polyagamma
+          python --version
+      - name: Run mypy
+        run: |
+          python ./scripts/run_mypy.py --verbose

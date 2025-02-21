@@ -1,4 +1,4 @@
-#   Copyright 2020 The PyMC Developers
+#   Copyright 2024 - present The PyMC Developers
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
@@ -11,20 +11,57 @@
 #   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
-import aesara.tensor as at
 import numpy as np
+import pytensor.tensor as pt
 
-from aesara.scalar import Clip
-from aesara.tensor import TensorVariable
-from aesara.tensor.random.op import RandomVariable
+from pytensor.tensor import TensorVariable
+from pytensor.tensor.random.op import RandomVariable
+from pytensor.tensor.random.utils import normalize_size_param
 
-from pymc.distributions.distribution import SymbolicDistribution, _moment
+from pymc.distributions.distribution import (
+    Distribution,
+    SymbolicRandomVariable,
+    _support_point,
+)
+from pymc.distributions.shape_utils import (
+    _change_dist_size,
+    change_dist_size,
+    implicit_size_from_params,
+    rv_size_is_none,
+)
 from pymc.util import check_dist_not_registered
 
 
-class Censored(SymbolicDistribution):
+class CensoredRV(SymbolicRandomVariable):
+    """Censored random variable."""
+
+    inline_logprob = True
+    extended_signature = "(),(),()->()"
+    _print_name = ("Censored", "\\operatorname{Censored}")
+
+    @classmethod
+    def rv_op(cls, dist, lower, upper, *, size=None):
+        # We don't allow passing `rng` because we don't fully control the rng of the components!
+        lower = pt.constant(-np.inf) if lower is None else pt.as_tensor(lower)
+        upper = pt.constant(np.inf) if upper is None else pt.as_tensor(upper)
+        size = normalize_size_param(size)
+
+        if rv_size_is_none(size):
+            size = implicit_size_from_params(dist, lower, upper, ndims_params=cls.ndims_params)
+
+        # Censoring is achieved by clipping the base distribution between lower and upper
+        dist = change_dist_size(dist, size)
+        censored_rv = pt.clip(dist, lower, upper)
+
+        return CensoredRV(
+            inputs=[dist, lower, upper],
+            outputs=[censored_rv],
+        )(dist, lower, upper)
+
+
+class Censored(Distribution):
     r"""
-    Censored distribution
+    Censored distribution.
 
     The pdf of a censored distribution is
 
@@ -41,13 +78,25 @@ class Censored(SymbolicDistribution):
 
     Parameters
     ----------
-    dist: PyMC unnamed distribution
-        PyMC distribution created via the `.dist()` API, which will be censored. This
-        distribution must be univariate and have a logcdf method implemented.
-    lower: float or None
+    dist : unnamed_distribution
+        Univariate distribution which will be censored.
+        This distribution must have a logcdf method implemented for sampling.
+
+        .. warning:: dist will be cloned, rendering it independent of the one passed as input.
+
+    lower : float or None
         Lower (left) censoring point. If `None` the distribution will not be left censored
-    upper: float or None
+    upper : float or None
         Upper (right) censoring point. If `None`, the distribution will not be right censored.
+
+    Warnings
+    --------
+    Continuous censored distributions should only be used as likelihoods.
+    Continuous censored distributions are a form of discrete-continuous mixture
+    and as such cannot be sampled properly without a custom step sampler.
+    If you wish to sample such a distribution, you can add the latent uncensored
+    distribution to the model and then wrap it in a :class:`~pymc.Deterministic`
+    :func:`~pymc.math.clip`.
 
 
     Examples
@@ -59,9 +108,14 @@ class Censored(SymbolicDistribution):
             censored_normal = pm.Censored("censored_normal", normal_dist, lower=-1, upper=1)
     """
 
+    rv_type = CensoredRV
+    rv_op = CensoredRV.rv_op
+
     @classmethod
-    def dist(cls, dist, lower, upper, **kwargs):
-        if not isinstance(dist, TensorVariable) or not isinstance(dist.owner.op, RandomVariable):
+    def dist(cls, dist, lower=-np.inf, upper=np.inf, **kwargs):
+        if not isinstance(dist, TensorVariable) or not isinstance(
+            dist.owner.op, RandomVariable | SymbolicRandomVariable
+        ):
             raise ValueError(
                 f"Censoring dist must be a distribution created via the `.dist()` API, got {type(dist)}"
             )
@@ -72,76 +126,33 @@ class Censored(SymbolicDistribution):
         check_dist_not_registered(dist)
         return super().dist([dist, lower, upper], **kwargs)
 
-    @classmethod
-    def rv_op(cls, dist, lower=None, upper=None, size=None, rngs=None):
-        if lower is None:
-            lower = at.constant(-np.inf)
-        if upper is None:
-            upper = at.constant(np.inf)
 
-        # Censoring is achieved by clipping the base distribution between lower and upper
-        rv_out = at.clip(dist, lower, upper)
-
-        # Reference nodes to facilitate identification in other classmethods, without
-        # worring about possible dimshuffles
-        rv_out.tag.dist = dist
-        rv_out.tag.lower = lower
-        rv_out.tag.upper = upper
-
-        if size is not None:
-            rv_out = cls.change_size(rv_out, size)
-        if rngs is not None:
-            rv_out = cls.change_rngs(rv_out, rngs)
-
-        return rv_out
-
-    @classmethod
-    def ndim_supp(cls, *dist_params):
-        return 0
-
-    @classmethod
-    def change_size(cls, rv, new_size, expand=False):
-        dist_node = rv.tag.dist.owner
-        lower = rv.tag.lower
-        upper = rv.tag.upper
-        rng, old_size, dtype, *dist_params = dist_node.inputs
-        new_size = new_size if not expand else tuple(new_size) + tuple(old_size)
-        new_dist = dist_node.op.make_node(rng, new_size, dtype, *dist_params).default_output()
-        return cls.rv_op(new_dist, lower, upper)
-
-    @classmethod
-    def change_rngs(cls, rv, new_rngs):
-        (new_rng,) = new_rngs
-        dist_node = rv.tag.dist.owner
-        lower = rv.tag.lower
-        upper = rv.tag.upper
-        olg_rng, size, dtype, *dist_params = dist_node.inputs
-        new_dist = dist_node.op.make_node(new_rng, size, dtype, *dist_params).default_output()
-        return cls.rv_op(new_dist, lower, upper)
-
-    @classmethod
-    def graph_rvs(cls, rv):
-        return (rv.tag.dist,)
+@_change_dist_size.register(CensoredRV)
+def change_censored_size(cls, dist, new_size, expand=False):
+    uncensored_dist, lower, upper = dist.owner.inputs
+    if expand:
+        new_size = tuple(new_size) + tuple(uncensored_dist.shape)
+    return Censored.rv_op(uncensored_dist, lower, upper, size=new_size)
 
 
-@_moment.register(Clip)
-def moment_censored(op, rv, dist, lower, upper):
-    moment = at.switch(
-        at.eq(lower, -np.inf),
-        at.switch(
-            at.isinf(upper),
+@_support_point.register(CensoredRV)
+def support_point_censored(op, rv, dist, lower, upper):
+    support_point = pt.switch(
+        pt.eq(lower, -np.inf),
+        pt.switch(
+            pt.isinf(upper),
             # lower = -inf, upper = inf
             0,
             # lower = -inf, upper = x
             upper - 1,
         ),
-        at.switch(
-            at.eq(upper, np.inf),
+        pt.switch(
+            pt.eq(upper, np.inf),
             # lower = x, upper = inf
             lower + 1,
             # lower = x, upper = x
             (lower + upper) / 2,
         ),
     )
-    moment = at.full_like(dist, moment)
-    return moment
+    support_point = pt.full_like(dist, support_point)
+    return support_point

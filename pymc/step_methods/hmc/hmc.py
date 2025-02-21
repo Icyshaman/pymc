@@ -1,4 +1,4 @@
-#   Copyright 2020 The PyMC Developers
+#   Copyright 2024 - present The PyMC Developers
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
@@ -12,18 +12,31 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
+from __future__ import annotations
+
+from dataclasses import field
+from typing import Any
+
 import numpy as np
 
-from pymc.step_methods.arraystep import Competence
-from pymc.step_methods.hmc.base_hmc import BaseHMC, DivergenceInfo, HMCStepData
+from pymc.stats.convergence import SamplerWarning
+from pymc.step_methods.compound import Competence
+from pymc.step_methods.hmc.base_hmc import BaseHMC, BaseHMCState, DivergenceInfo, HMCStepData
 from pymc.step_methods.hmc.integration import IntegrationError, State
+from pymc.step_methods.state import dataclass_state
 from pymc.vartypes import discrete_types
 
 __all__ = ["HamiltonianMC"]
 
 
-def unif(step_size, elow=0.85, ehigh=1.15):
-    return np.random.uniform(elow, ehigh) * step_size
+def unif(step_size, elow=0.85, ehigh=1.15, rng: np.random.Generator | None = None):
+    return (rng or np.random).uniform(elow, ehigh) * step_size
+
+
+@dataclass_state
+class HamiltonianMCState(BaseHMCState):
+    path_length: float = field(metadata={"frozen": True})
+    max_steps: int = field(metadata={"frozen": True})
 
 
 class HamiltonianMC(BaseHMC):
@@ -34,28 +47,29 @@ class HamiltonianMC(BaseHMC):
 
     name = "hmc"
     default_blocked = True
-    generates_stats = True
-    stats_dtypes = [
-        {
-            "step_size": np.float64,
-            "n_steps": np.int64,
-            "tune": bool,
-            "step_size_bar": np.float64,
-            "accept": np.float64,
-            "diverging": bool,
-            "energy_error": np.float64,
-            "energy": np.float64,
-            "path_length": np.float64,
-            "accepted": bool,
-            "model_logp": np.float64,
-            "process_time_diff": np.float64,
-            "perf_counter_diff": np.float64,
-            "perf_counter_start": np.float64,
-        }
-    ]
+    stats_dtypes_shapes = {
+        "step_size": (np.float64, []),
+        "n_steps": (np.int64, []),
+        "tune": (bool, []),
+        "step_size_bar": (np.float64, []),
+        "accept": (np.float64, []),
+        "diverging": (bool, []),
+        "energy_error": (np.float64, []),
+        "energy": (np.float64, []),
+        "path_length": (np.float64, []),
+        "accepted": (bool, []),
+        "model_logp": (np.float64, []),
+        "process_time_diff": (np.float64, []),
+        "perf_counter_diff": (np.float64, []),
+        "perf_counter_start": (np.float64, []),
+        "largest_eigval": (np.float64, []),
+        "smallest_eigval": (np.float64, []),
+        "warning": (SamplerWarning, None),
+    }
 
     def __init__(self, vars=None, path_length=2.0, max_steps=1024, **kwargs):
-        """Set up the Hamiltonian Monte Carlo sampler.
+        """
+        Set up the Hamiltonian Monte Carlo sampler.
 
         Parameters
         ----------
@@ -75,7 +89,7 @@ class HamiltonianMC(BaseHMC):
         scaling: array_like, ndim = {1,2}
             The inverse mass, or precision matrix. One dimensional arrays are
             interpreted as diagonal matrices. If `is_cov` is set to True,
-            this will be interpreded as the mass or covariance matrix.
+            this will be interpreted as the mass or covariance matrix.
         is_cov: bool, default=False
             Treat the scaling as mass or covariance matrix.
         potential: Potential, optional
@@ -107,6 +121,14 @@ class HamiltonianMC(BaseHMC):
             The maximum number of leapfrog steps.
         model: pymc.Model
             The model
+        rng : RandomGenerator
+            An object that can produce be used to produce the step method's
+            :py:class:`~numpy.random.Generator` object. Refer to
+            :py:func:`pymc.util.get_random_generator` for more information. The
+            resulting ``Generator`` object will be used stored in the step method
+            and used for accept/reject random selections. The step's ``Generator``
+            will also be used to spawn independent ``Generators`` that will be used
+            by the ``potential`` attribute.
         **kwargs: passed to BaseHMC
         """
         kwargs.setdefault("step_rand", unif)
@@ -115,7 +137,7 @@ class HamiltonianMC(BaseHMC):
         self.path_length = path_length
         self.max_steps = max_steps
 
-    def _hamiltonian_step(self, start, p0, step_size):
+    def _hamiltonian_step(self, start, p0, step_size: float) -> HMCStepData:
         n_steps = max(1, int(self.path_length / step_size))
         n_steps = min(self.max_steps, n_steps)
 
@@ -145,14 +167,14 @@ class HamiltonianMC(BaseHMC):
 
         accept_stat = min(1, np.exp(-energy_change))
 
-        if div_info is not None or np.random.rand() >= accept_stat:
+        if div_info is not None or self.rng.random() >= accept_stat:
             end = start
             accepted = False
         else:
             end = state
             accepted = True
 
-        stats = {
+        stats: dict[str, Any] = {
             "path_length": self.path_length,
             "n_steps": n_steps,
             "accept": accept_stat,
@@ -162,7 +184,16 @@ class HamiltonianMC(BaseHMC):
             "model_logp": state.model_logp,
         }
         # Retrieve State q and p data from respective RaveledVars
-        end = State(end.q.data, end.p.data, end.v, end.q_grad, end.energy, end.model_logp)
+        end = State(
+            end.q.data,
+            end.p.data,
+            end.v,
+            end.q_grad,
+            end.energy,
+            end.model_logp,
+            end.index_in_trajectory,
+        )
+        stats.update(self.potential.stats())
         return HMCStepData(end, accept_stat, div_info, stats)
 
     @staticmethod

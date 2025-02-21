@@ -1,4 +1,4 @@
-#   Copyright 2020 The PyMC Developers
+#   Copyright 2024 - present The PyMC Developers
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
@@ -14,34 +14,32 @@
 
 import logging
 
-import aesara
-import aesara.tensor as at
 import numpy as np
+import pytensor
+import pytensor.tensor as pt
 
-from aeppl.logprob import _logprob
-from aesara.graph.op import Apply, Op
-from aesara.tensor.random.op import RandomVariable
-from aesara.tensor.var import TensorVariable
+from pytensor.graph.op import Apply, Op
+from pytensor.tensor.random.op import RandomVariable
+from pytensor.tensor.utils import safe_signature
+from pytensor.tensor.variable import TensorVariable
 from scipy.spatial import cKDTree
 
-from pymc.aesaraf import floatX
-from pymc.distributions.distribution import NoDistribution, _moment
+from pymc.distributions.distribution import Distribution, _support_point
+from pymc.logprob.abstract import _logprob
 
 __all__ = ["Simulator"]
 
-_log = logging.getLogger("pymc")
+_log = logging.getLogger(__name__)
 
 
 class SimulatorRV(RandomVariable):
     """
-    Base class for SimulatorRVs
+    Base class for SimulatorRVs.
 
     This should be subclassed when defining custom Simulator objects.
     """
 
     name = "SimulatorRV"
-    ndim_supp = None
-    ndims_params = None
     dtype = "floatX"
     _print_name = ("Simulator", "\\operatorname{Simulator}")
 
@@ -63,10 +61,9 @@ class SimulatorRV(RandomVariable):
         return cls._sum_stat(*args, **kwargs)
 
 
-class Simulator(NoDistribution):
+class Simulator(Distribution):
     r"""
-    Simulator distribution, used for Approximate Bayesian Inference (ABC)
-    with Sequential Monte Carlo (SMC) sampling via ``pm.sample_smc``.
+    Used for Approximate Bayesian Inference with SMC sampling via :func:`~pymc.sample_smc`.
 
     Simulator distributions have a stochastic pseudo-loglikelihood defined by
     a distance metric between the observed and simulated data, and tweaked
@@ -74,18 +71,21 @@ class Simulator(NoDistribution):
 
     Parameters
     ----------
-    fn: callable
+    fn : callable
         Python random simulator function. Should expect the following signature
-        ``(rng, arg1, arg2, ... argn, size)``, where rng is a ``numpy.random.RandomStream()``
+        ``(rng, arg1, arg2, ... argn, size)``, where rng is a ``numpy.random.Generator``
         and ``size`` defines the size of the desired sample.
-    params: list
-        Parameters used by the Simulator random function. Parameters can also
-        be passed by order, in which case the keyword argument ``params`` is
-        ignored. Alternatively, each parameter can be passed by order after fn,
-        ``param1, param2, ..., paramN``
-    distance : Aesara Op, callable or str
-        Distance function. Available options are ``"gaussian"`` (default), ``"laplace"``,
-        ``"kullback_leibler"`` or a user defined function (or Aesara Op) that takes
+    *unnamed_params : list of TensorVariable
+        Parameters used by the Simulator random function. Each parameter can be passed
+        by order after fn, for example ``param1, param2, ..., paramN``. params can also
+        be passed with keyword argument "params".
+    params : list of TensorVariable
+        Keyword form of ''unnamed_params''.
+        One of unnamed_params or params must be provided.
+        If passed both unnamed_params and params, an error is raised.
+    distance : PyTensor_Op, callable or str, default "gaussian"
+        Distance function. Available options are ``"gaussian"``, ``"laplace"``,
+        ``"kullback_leibler"`` or a user defined function (or PyTensor_Op) that takes
         ``epsilon``, the summary statistics of observed_data and the summary statistics
         of simulated_data as input.
 
@@ -98,20 +98,21 @@ class Simulator(NoDistribution):
         ``distance="gaussian"`` + ``sum_stat="sort"`` is equivalent to the 1D 2-wasserstein distance
 
         ``distance="laplace"`` + ``sum_stat="sort"`` is equivalent to the the 1D 1-wasserstein distance
-    sum_stat: Aesara Op, callable or str
-        Summary statistic function. Available options are ``"indentity"`` (default),
-        ``"sort"``, ``"mean"``, ``"median"``. If a callable (or Aesara Op) is defined,
-        it should return a 1d numpy array (or Aesara vector).
-    epsilon: float or array
+    sum_stat : PyTensor_Op, callable or str, default "identity"
+        Summary statistic function. Available options are ``"identity"``,
+        ``"sort"``, ``"mean"``, ``"median"``. If a callable (or PyTensor_Op) is defined,
+        it should return a 1d numpy array (or PyTensor vector).
+    epsilon : tensor_like of float, default 1.0
         Scaling parameter for the distance functions. It should be a float or
-        an array of the same size of the output of ``sum_stat``. Defaults to ``1.0``
-    ndim_supp : int
+        an array of the same size of the output of ``sum_stat``.
+    ndim_supp : int, default 0
         Number of dimensions of the SimulatorRV (0 for scalar, 1 for vector, etc.)
-        Defaults to ``0``.
-    ndims_params: list[int]
+    ndims_params : list of int, optional
         Number of minimum dimensions of each parameter of the RV. For example,
         if the Simulator accepts two scalar inputs, it should be ``[0, 0]``.
-        Defaults to ``0`` for each parameter.
+        Default to list of 0 with length equal to the number of parameters.
+    class_name : str, optional
+        Suffix name for the RandomVariable class which will wrap the Simulator methods.
 
     Examples
     --------
@@ -119,6 +120,7 @@ class Simulator(NoDistribution):
 
         def simulator_fn(rng, loc, scale, size):
             return rng.normal(loc, scale, size=size)
+
 
         with pm.Model() as m:
             loc = pm.Normal("loc", 0, 1)
@@ -135,21 +137,28 @@ class Simulator(NoDistribution):
 
     """
 
-    def __new__(
+    rv_type = SimulatorRV
+
+    def __new__(cls, name, *args, **kwargs):
+        kwargs.setdefault("class_name", f"Simulator_{name}")
+        return super().__new__(cls, name, *args, **kwargs)
+
+    @classmethod
+    def dist(  # type: ignore[override]
         cls,
-        name,
         fn,
         *unnamed_params,
         params=None,
         distance="gaussian",
         sum_stat="identity",
         epsilon=1,
-        ndim_supp=0,
+        signature=None,
+        ndim_supp=None,
         ndims_params=None,
         dtype="floatX",
+        class_name: str = "Simulator",
         **kwargs,
     ):
-
         if not isinstance(distance, Op):
             if distance == "gaussian":
                 distance = gaussian
@@ -157,8 +166,8 @@ class Simulator(NoDistribution):
                 distance = laplace
             elif distance == "kullback_leibler":
                 raise NotImplementedError("KL not refactored yet")
-                # TODO: Wrap KL in aesara OP
-                # distance = KullbackLiebler(observed)
+                # TODO: Wrap KL in pytensor OP
+                # distance = KullbackLeibler(observed)
                 # if sum_stat != "identity":
                 #     _log.info(f"Automatically setting sum_stat to identity as expected by {distance}")
                 #     sum_stat = "identity"
@@ -171,18 +180,18 @@ class Simulator(NoDistribution):
             if sum_stat == "identity":
                 sum_stat = identity
             elif sum_stat == "sort":
-                sum_stat = at.sort
+                sum_stat = pt.sort
             elif sum_stat == "mean":
-                sum_stat = at.mean
+                sum_stat = pt.mean
             elif sum_stat == "median":
-                # Missing in Aesara, see aesara/issues/525
+                # Missing in PyTensor, see pytensor/issues/525
                 sum_stat = create_sum_stat_op_from_fn(np.median)
             elif callable(sum_stat):
                 sum_stat = create_sum_stat_op_from_fn(sum_stat)
             else:
                 raise ValueError(f"The summary statistic {sum_stat} is not implemented")
 
-        epsilon = at.as_tensor_variable(floatX(epsilon))
+        epsilon = pt.as_tensor_variable(epsilon)
 
         if params is None:
             params = unnamed_params
@@ -190,74 +199,89 @@ class Simulator(NoDistribution):
             if unnamed_params:
                 raise ValueError("Cannot pass both unnamed parameters and `params`")
 
-        # Assume scalar ndims_params
-        if ndims_params is None:
-            ndims_params = [0] * len(params)
+        if signature is None:
+            # Assume scalar ndims_params
+            temp_ndims_params = ndims_params if ndims_params is not None else [0] * len(params)
+            # Assume scalar ndim_supp
+            temp_ndim_supp = ndim_supp if ndim_supp is not None else 0
+            signature = safe_signature(
+                core_inputs_ndim=temp_ndims_params, core_outputs_ndim=[temp_ndim_supp]
+            )
 
-        sim_op = type(
-            f"Simulator_{name}",
-            (SimulatorRV,),
-            dict(
-                name="Simulator",
-                ndim_supp=ndim_supp,
-                ndims_params=ndims_params,
-                dtype=dtype,
-                inplace=False,
-                fn=fn,
-                _distance=distance,
-                _sum_stat=sum_stat,
-                epsilon=epsilon,
-            ),
-        )()
-
-        # The logp function is registered to the more general SimulatorRV,
-        # in order to avoid issues with multiprocessing / pickling
-
-        # rv_type = type(sim_op)
-        # NoDistribution.register(rv_type)
-        NoDistribution.register(SimulatorRV)
-
-        @_logprob.register(SimulatorRV)
-        def logp(op, value_var_list, *dist_params, **kwargs):
-            _dist_params = dist_params[3:]
-            value_var = value_var_list[0]
-            return cls.logp(value_var, op, dist_params)
-
-        @_moment.register(SimulatorRV)
-        def moment(op, rv, rng, size, dtype, *rv_inputs):
-            return cls.moment(rv, *rv_inputs)
-
-        cls.rv_op = sim_op
-        return super().__new__(cls, name, *params, **kwargs)
-
-    @classmethod
-    def dist(cls, *params, **kwargs):
-        return super().dist(params, **kwargs)
-
-    @classmethod
-    def moment(cls, rv, *sim_inputs):
-        # Take the mean of 10 draws
-        multiple_sim = rv.owner.op(*sim_inputs, size=at.concatenate([[10], rv.shape]))
-        return at.mean(multiple_sim, axis=0)
-
-    @classmethod
-    def logp(cls, value, sim_op, sim_inputs):
-        # Use a new rng to avoid non-randomness in parallel sampling
-        # TODO: Model rngs should be updated prior to multiprocessing split,
-        #  in which case this would not be needed. However, that would have to be
-        #  done for every sampler that may accomodate Simulators
-        rng = aesara.shared(np.random.default_rng())
-        rng.tag.is_rng = True
-
-        # Create a new simulatorRV with identical inputs as the original one
-        sim_value = sim_op.make_node(rng, *sim_inputs[1:]).default_output()
-        sim_value.name = "sim_value"
-
-        return sim_op.distance(
-            sim_op.epsilon,
-            sim_op.sum_stat(value),
-            sim_op.sum_stat(sim_value),
+        return super().dist(
+            params,
+            fn=fn,
+            signature=signature,
+            ndim_supp=ndim_supp,
+            ndims_params=ndims_params,
+            dtype=dtype,
+            distance=distance,
+            sum_stat=sum_stat,
+            epsilon=epsilon,
+            class_name=class_name,
+            **kwargs,
         )
+
+    @classmethod
+    def rv_op(
+        cls,
+        *params,
+        fn,
+        ndim_supp,
+        ndims_params,
+        dtype,
+        distance,
+        sum_stat,
+        epsilon,
+        class_name,
+        signature,
+        **kwargs,
+    ):
+        sim_op = type(
+            class_name,
+            (SimulatorRV,),
+            {
+                "name": class_name,
+                "ndim_supp": ndim_supp,
+                "ndims_params": ndims_params,
+                "signature": signature,
+                "dtype": dtype,
+                "inplace": False,
+                "fn": fn,
+                "_distance": distance,
+                "_sum_stat": sum_stat,
+                "epsilon": epsilon,
+            },
+        )()
+        return sim_op(*params, **kwargs)
+
+
+@_support_point.register(SimulatorRV)
+def simulator_support_point(op, rv, *inputs):
+    sim_inputs = op.dist_params(rv.owner)
+    # Take the mean of 10 draws
+    multiple_sim = rv.owner.op(*sim_inputs, size=pt.concatenate([[10], rv.shape]))
+    return pt.mean(multiple_sim, axis=0)
+
+
+@_logprob.register(SimulatorRV)
+def simulator_logp(op, values, *inputs, **kwargs):
+    (value,) = values
+
+    # Use a new rng to avoid non-randomness in parallel sampling
+    # TODO: Model rngs should be updated prior to multiprocessing split,
+    #  in which case this would not be needed. However, that would have to be
+    #  done for every sampler that may accommodate Simulators
+    rng = pytensor.shared(np.random.default_rng(), name="simulator_rng")
+    # Create a new simulatorRV with identical inputs as the original one
+    sim_value = op.make_node(rng, *inputs[1:]).default_output()
+    sim_value.name = "simulator_value"
+
+    return op.distance(
+        op.epsilon,
+        op.sum_stat(value),
+        op.sum_stat(sim_value),
+    )
 
 
 def identity(x):
@@ -272,11 +296,11 @@ def gaussian(epsilon, obs_data, sim_data):
 
 def laplace(epsilon, obs_data, sim_data):
     """Laplace kernel."""
-    return -at.abs_((obs_data - sim_data) / epsilon)
+    return -pt.abs((obs_data - sim_data) / epsilon)
 
 
-class KullbackLiebler:
-    """Approximate Kullback-Liebler."""
+class KullbackLeibler:
+    """Approximate Kullback-Leibler."""
 
     def __init__(self, obs_data):
         if obs_data.ndim == 1:
@@ -296,7 +320,7 @@ class KullbackLiebler:
 
 
 def create_sum_stat_op_from_fn(fn):
-    vectorX = at.dvector if aesara.config.floatX == "float64" else at.fvector
+    vectorX = pt.dvector if pytensor.config.floatX == "float64" else pt.fvector
 
     # Check if callable returns TensorVariable with dummy inputs
     try:
@@ -306,22 +330,22 @@ def create_sum_stat_op_from_fn(fn):
     except Exception:
         pass
 
-    # Otherwise, automatically wrap in Aesara Op
+    # Otherwise, automatically wrap in PyTensor Op
     class SumStat(Op):
         def make_node(self, x):
-            x = at.as_tensor_variable(x)
+            x = pt.as_tensor_variable(x)
             return Apply(self, [x], [vectorX()])
 
         def perform(self, node, inputs, outputs):
             (x,) = inputs
-            outputs[0][0] = np.atleast_1d(fn(x)).astype(aesara.config.floatX)
+            outputs[0][0] = np.atleast_1d(fn(x)).astype(pytensor.config.floatX)
 
     return SumStat()
 
 
 def create_distance_op_from_fn(fn):
-    scalarX = at.dscalar if aesara.config.floatX == "float64" else at.fscalar
-    vectorX = at.dvector if aesara.config.floatX == "float64" else at.fvector
+    scalarX = pt.dscalar if pytensor.config.floatX == "float64" else pt.fscalar
+    vectorX = pt.dvector if pytensor.config.floatX == "float64" else pt.fvector
 
     # Check if callable returns TensorVariable with dummy inputs
     try:
@@ -331,16 +355,18 @@ def create_distance_op_from_fn(fn):
     except Exception:
         pass
 
-    # Otherwise, automatically wrap in Aesara Op
+    # Otherwise, automatically wrap in PyTensor Op
     class Distance(Op):
         def make_node(self, epsilon, obs_data, sim_data):
-            epsilon = at.as_tensor_variable(epsilon)
-            obs_data = at.as_tensor_variable(obs_data)
-            sim_data = at.as_tensor_variable(sim_data)
+            epsilon = pt.as_tensor_variable(epsilon)
+            obs_data = pt.as_tensor_variable(obs_data)
+            sim_data = pt.as_tensor_variable(sim_data)
             return Apply(self, [epsilon, obs_data, sim_data], [vectorX()])
 
         def perform(self, node, inputs, outputs):
             eps, obs_data, sim_data = inputs
-            outputs[0][0] = np.atleast_1d(fn(eps, obs_data, sim_data)).astype(aesara.config.floatX)
+            outputs[0][0] = np.atleast_1d(fn(eps, obs_data, sim_data)).astype(
+                pytensor.config.floatX
+            )
 
     return Distance()

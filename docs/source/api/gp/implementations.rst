@@ -6,6 +6,8 @@ Implementations
 .. autosummary::
    :toctree: generated
 
+   HSGP
+   HSGPPeriodic
    Latent
    LatentKron
    Marginal

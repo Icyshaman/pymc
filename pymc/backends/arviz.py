@@ -1,56 +1,63 @@
+#   Copyright 2024 - present The PyMC Developers
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
 """PyMC-ArviZ conversion code."""
+
 import logging
 import warnings
 
-from typing import (  # pylint: disable=unused-import
+from collections.abc import Iterable, Mapping, Sequence
+from typing import (
     TYPE_CHECKING,
     Any,
-    Dict,
-    Iterable,
-    Mapping,
     Optional,
-    Sequence,
-    Tuple,
     Union,
+    cast,
 )
 
 import numpy as np
-import xarray as xr
+import xarray
 
-from aesara.graph.basic import Constant
-from aesara.tensor.sharedvar import SharedVariable
-from aesara.tensor.subtensor import AdvancedIncSubtensor, AdvancedIncSubtensor1
 from arviz import InferenceData, concat, rcParams
 from arviz.data.base import CoordSpec, DimSpec, dict_to_dataset, requires
+from pytensor.graph import ancestors
+from pytensor.tensor.sharedvar import SharedVariable
+from rich.progress import Console
+from rich.theme import Theme
+from xarray import Dataset
 
 import pymc
 
-from pymc.aesaraf import extract_obs_data
-from pymc.model import modelcontext
-from pymc.util import get_default_varnames
+from pymc.model import Model, modelcontext
+from pymc.pytensorf import PointFunc, extract_obs_data
+from pymc.util import CustomProgress, default_progress_theme, get_default_varnames
 
 if TYPE_CHECKING:
-    from typing import Set  # pylint: disable=ungrouped-imports
-
-    from pymc.backends.base import MultiTrace  # pylint: disable=invalid-name
-    from pymc.model import Model
+    from pymc.backends.base import MultiTrace
 
 ___all__ = [""]
 
-_log = logging.getLogger("pymc")
+_log = logging.getLogger(__name__)
 
 # random variable object ...
-Var = Any  # pylint: disable=invalid-name
+Var = Any
 
 
-def find_observations(model: Optional["Model"]) -> Optional[Dict[str, Var]]:
+def find_observations(model: "Model") -> dict[str, Var]:
     """If there are observations available, return them as a dictionary."""
-    if model is None:
-        return None
-
     observations = {}
     for obs in model.observed_RVs:
-        aux_obs = getattr(obs.tag, "observations", None)
+        aux_obs = model.rvs_to_values.get(obs, None)
         if aux_obs is not None:
             try:
                 obs_data = extract_obs_data(aux_obs)
@@ -61,6 +68,39 @@ def find_observations(model: Optional["Model"]) -> Optional[Dict[str, Var]]:
             warnings.warn(f"No data for observation {obs}")
 
     return observations
+
+
+def find_constants(model: "Model") -> dict[str, Var]:
+    """If there are constants available, return them as a dictionary."""
+    model_vars = model.basic_RVs + model.deterministics + model.potentials
+    value_vars = set(model.rvs_to_values.values())
+
+    constant_data = {}
+    for var in model.data_vars:
+        if var in value_vars:
+            # An observed value variable could also be part of the generative graph
+            if var not in ancestors(model_vars):
+                continue
+
+        if isinstance(var, SharedVariable):
+            var_value = var.get_value()
+        else:
+            var_value = var.data
+        constant_data[var.name] = var_value
+
+    return constant_data
+
+
+def coords_and_dims_for_inferencedata(model: Model) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Parse PyMC model coords and dims format to one accepted by InferenceData."""
+    coords = {
+        cname: np.array(cvals) if isinstance(cvals, tuple) else cvals
+        for cname, cvals in model.coords.items()
+        if cvals is not None
+    }
+    dims = {dname: list(dvals) for dname, dvals in model.named_vars_to_dims.items()}
+
+    return coords, dims
 
 
 class _DefaultTrace:
@@ -86,7 +126,7 @@ class _DefaultTrace:
 
     def __init__(self, samples: int):
         self._len: int = samples
-        self.trace_dict: Dict[str, np.ndarray] = {}
+        self.trace_dict: dict[str, np.ndarray] = {}
 
     def insert(self, k: str, v, idx: int):
         """
@@ -105,7 +145,7 @@ class _DefaultTrace:
 
         # initialize if necessary
         if k not in self.trace_dict:
-            array_shape = (self._len,) + value_shape
+            array_shape = (self._len, *value_shape)
             self.trace_dict[k] = np.empty(array_shape, dtype=np.array(v).dtype)
 
         # do the actual insertion
@@ -115,15 +155,13 @@ class _DefaultTrace:
             self.trace_dict[k][idx, :] = v
 
 
-class InferenceDataConverter:  # pylint: disable=too-many-instance-attributes
+class InferenceDataConverter:
     """Encapsulate InferenceData specific logic."""
 
-    model = None  # type: Optional[Model]
-    nchains = None  # type: int
-    ndraws = None  # type: int
-    posterior_predictive = None  # Type: Optional[Mapping[str, np.ndarray]]
-    predictions = None  # Type: Optional[Mapping[str, np.ndarray]]
-    prior = None  # Type: Optional[Mapping[str, np.ndarray]]
+    model: Model | None = None
+    posterior_predictive: Mapping[str, np.ndarray] | None = None
+    predictions: Mapping[str, np.ndarray] | None = None
+    prior: Mapping[str, np.ndarray] | None = None
 
     def __init__(
         self,
@@ -131,15 +169,18 @@ class InferenceDataConverter:  # pylint: disable=too-many-instance-attributes
         trace=None,
         prior=None,
         posterior_predictive=None,
-        log_likelihood=True,
+        log_likelihood=False,
+        log_prior=False,
         predictions=None,
-        coords: Optional[CoordSpec] = None,
-        dims: Optional[DimSpec] = None,
+        coords: CoordSpec | None = None,
+        dims: DimSpec | None = None,
+        sample_dims: list | None = None,
         model=None,
-        save_warmup: Optional[bool] = None,
+        save_warmup: bool | None = None,
+        include_transformed: bool = False,
     ):
-
         self.save_warmup = rcParams["data.save_warmup"] if save_warmup is None else save_warmup
+        self.include_transformed = include_transformed
         self.trace = trace
 
         # this permits us to get the model from command-line argument or from with model:
@@ -171,6 +212,7 @@ class InferenceDataConverter:  # pylint: disable=too-many-instance-attributes
         self.prior = prior
         self.posterior_predictive = posterior_predictive
         self.log_likelihood = log_likelihood
+        self.log_prior = log_prior
         self.predictions = predictions
 
         if all(elem is None for elem in (trace, predictions, posterior_predictive, prior)):
@@ -179,27 +221,19 @@ class InferenceDataConverter:  # pylint: disable=too-many-instance-attributes
                 " one of trace, prior, posterior_predictive or predictions."
             )
 
-        # Make coord types more rigid
-        untyped_coords: Dict[str, Optional[Sequence[Any]]] = {**self.model.coords}
-        if coords:
-            untyped_coords.update(coords)
-        self.coords = {
-            cname: np.array(cvals) if isinstance(cvals, tuple) else cvals
-            for cname, cvals in untyped_coords.items()
-            if cvals is not None
-        }
+        user_coords = {} if coords is None else coords
+        user_dims = {} if dims is None else dims
+        model_coords, model_dims = coords_and_dims_for_inferencedata(self.model)
+        self.coords = {**model_coords, **user_coords}
+        self.dims = {**model_dims, **user_dims}
 
-        self.dims = {} if dims is None else dims
-        if hasattr(self.model, "RV_dims"):
-            model_dims = {
-                var_name: [dim for dim in dims if dim is not None]
-                for var_name, dims in self.model.RV_dims.items()
-            }
-            self.dims = {**model_dims, **self.dims}
+        if sample_dims is None:
+            sample_dims = ["chain", "draw"]
+        self.sample_dims = sample_dims
 
         self.observations = find_observations(self.model)
 
-    def split_trace(self) -> Tuple[Union[None, "MultiTrace"], Union[None, "MultiTrace"]]:
+    def split_trace(self) -> tuple[Union[None, "MultiTrace"], Union[None, "MultiTrace"]]:
         """Split MultiTrace object into posterior and warmup.
 
         Returns
@@ -219,72 +253,12 @@ class InferenceDataConverter:  # pylint: disable=too-many-instance-attributes
             trace_posterior = self.trace[self.ntune :]
         return trace_posterior, trace_warmup
 
-    def log_likelihood_vals_point(self, point, var, log_like_fun):
-        """Compute log likelihood for each observed point."""
-        # TODO: This is a cheap hack; we should filter-out the correct
-        # variables some other way
-        point = {i.name: point[i.name] for i in log_like_fun.f.maker.inputs if i.name in point}
-        log_like_val = np.atleast_1d(log_like_fun(point))
-
-        if isinstance(var.owner.op, (AdvancedIncSubtensor, AdvancedIncSubtensor1)):
-            try:
-                obs_data = extract_obs_data(var.tag.observations)
-            except TypeError:
-                warnings.warn(f"Could not extract data from symbolic observation {var}")
-
-            mask = obs_data.mask
-            if np.ndim(mask) > np.ndim(log_like_val):
-                mask = np.any(mask, axis=-1)
-            log_like_val = np.where(mask, np.nan, log_like_val)
-        return log_like_val
-
-    def _extract_log_likelihood(self, trace):
-        """Compute log likelihood of each observation."""
-        if self.trace is None:
-            return None
-        if self.model is None:
-            return None
-
-        # TODO: We no longer need one function per observed variable
-        if self.log_likelihood is True:
-            cached = [
-                (
-                    var,
-                    self.model.compile_fn(
-                        self.model.logpt(var, sum=False)[0],
-                        inputs=self.model.value_vars,
-                        on_unused_input="ignore",
-                    ),
-                )
-                for var in self.model.observed_RVs
-            ]
-        else:
-            cached = [
-                (
-                    var,
-                    self.model.compile_fn(
-                        self.model.logpt(var, sum=False)[0],
-                        inputs=self.model.value_vars,
-                        on_unused_input="ignore",
-                    ),
-                )
-                for var in self.model.observed_RVs
-                if var.name in self.log_likelihood
-            ]
-        log_likelihood_dict = _DefaultTrace(len(trace.chains))
-        for var, log_like_fun in cached:
-            for k, chain in enumerate(trace.chains):
-                log_like_chain = [
-                    self.log_likelihood_vals_point(point, var, log_like_fun)
-                    for point in trace.points([chain])
-                ]
-                log_likelihood_dict.insert(var.name, np.stack(log_like_chain), k)
-        return log_likelihood_dict.trace_dict
-
     @requires("trace")
     def posterior_to_xarray(self):
         """Convert the posterior to an xarray dataset."""
-        var_names = get_default_varnames(self.trace.varnames, include_transformed=False)
+        var_names = get_default_varnames(
+            self.trace.varnames, include_transformed=self.include_transformed
+        )
         data = {}
         data_warmup = {}
         for var_name in var_names:
@@ -331,10 +305,12 @@ class InferenceDataConverter:  # pylint: disable=too-many-instance-attributes
                 continue
             if self.warmup_trace:
                 data_warmup[name] = np.array(
-                    self.warmup_trace.get_sampler_stats(stat, combine=False)
+                    self.warmup_trace.get_sampler_stats(stat, combine=False, squeeze=False)
                 )
             if self.posterior_trace:
-                data[name] = np.array(self.posterior_trace.get_sampler_stats(stat, combine=False))
+                data[name] = np.array(
+                    self.posterior_trace.get_sampler_stats(stat, combine=False, squeeze=False)
+                )
 
         return (
             dict_to_dataset(
@@ -352,76 +328,24 @@ class InferenceDataConverter:  # pylint: disable=too-many-instance-attributes
                 attrs=self.attrs,
             ),
         )
-
-    @requires("trace")
-    @requires("model")
-    def log_likelihood_to_xarray(self):
-        """Extract log likelihood and log_p data from PyMC trace."""
-        if self.predictions or not self.log_likelihood:
-            return None
-        data_warmup = {}
-        data = {}
-        warn_msg = (
-            "Could not compute log_likelihood, it will be omitted. "
-            "Check your model object or set log_likelihood=False"
-        )
-        if self.posterior_trace:
-            try:
-                data = self._extract_log_likelihood(self.posterior_trace)
-            except TypeError:
-                warnings.warn(warn_msg)
-        if self.warmup_trace:
-            try:
-                data_warmup = self._extract_log_likelihood(self.warmup_trace)
-            except TypeError:
-                warnings.warn(warn_msg)
-        return (
-            dict_to_dataset(
-                data,
-                library=pymc,
-                dims=self.dims,
-                coords=self.coords,
-                skip_event_dims=True,
-            ),
-            dict_to_dataset(
-                data_warmup,
-                library=pymc,
-                dims=self.dims,
-                coords=self.coords,
-                skip_event_dims=True,
-            ),
-        )
-
-    def translate_posterior_predictive_dict_to_xarray(self, dct, kind) -> xr.Dataset:
-        """Take Dict of variables to numpy ndarrays (samples) and translate into dataset."""
-        data = {}
-        warning_vars = []
-        for k, ary in dct.items():
-            if (ary.shape[0] == self.nchains) and (ary.shape[1] == self.ndraws):
-                data[k] = ary
-            else:
-                data[k] = np.expand_dims(ary, 0)
-                warning_vars.append(k)
-        if warning_vars:
-            warnings.warn(
-                f"The shape of variables {', '.join(warning_vars)} in {kind} group is not compatible "
-                "with number of chains and draws. The automatic dimension naming might not have worked. "
-                "This can also mean that some draws or even whole chains are not represented.",
-                UserWarning,
-            )
-        return dict_to_dataset(data, library=pymc, coords=self.coords, dims=self.dims)
 
     @requires(["posterior_predictive"])
     def posterior_predictive_to_xarray(self):
         """Convert posterior_predictive samples to xarray."""
-        return self.translate_posterior_predictive_dict_to_xarray(
-            self.posterior_predictive, "posterior_predictive"
+        data = self.posterior_predictive
+        dims = {var_name: self.sample_dims + self.dims.get(var_name, []) for var_name in data}
+        return dict_to_dataset(
+            data, library=pymc, coords=self.coords, dims=dims, default_dims=self.sample_dims
         )
 
     @requires(["predictions"])
     def predictions_to_xarray(self):
         """Convert predictions (out of sample predictions) to xarray."""
-        return self.translate_posterior_predictive_dict_to_xarray(self.predictions, "predictions")
+        data = self.predictions
+        dims = {var_name: self.sample_dims + self.dims.get(var_name, []) for var_name in data}
+        return dict_to_dataset(
+            data, library=pymc, coords=self.coords, dims=dims, default_dims=self.sample_dims
+        )
 
     def priors_to_xarray(self):
         """Convert prior samples (and if possible prior predictive too) to xarray."""
@@ -464,52 +388,30 @@ class InferenceDataConverter:  # pylint: disable=too-many-instance-attributes
             default_dims=[],
         )
 
-    @requires(["trace", "predictions"])
     @requires("model")
     def constant_data_to_xarray(self):
         """Convert constant data to xarray."""
-        # For constant data, we are concerned only with deterministics and
-        # data.  The constant data vars must be either pm.Data
-        # (TensorConstant/SharedVariable) or pm.Deterministic
-        constant_data_vars = {}  # type: Dict[str, Var]
-
-        def is_data(name, var) -> bool:
-            assert self.model is not None
-            return (
-                var not in self.model.deterministics
-                and var not in self.model.observed_RVs
-                and var not in self.model.free_RVs
-                and var not in self.model.potentials
-                and var not in self.model.value_vars
-                and (self.observations is None or name not in self.observations)
-                and isinstance(var, (Constant, SharedVariable))
-            )
-
-        # I don't know how to find pm.Data, except that they are named
-        # variables that aren't observed or free RVs, nor are they
-        # deterministics, and then we eliminate observations.
-        for name, var in self.model.named_vars.items():
-            if is_data(name, var):
-                constant_data_vars[name] = var
-
-        if not constant_data_vars:
+        constant_data = find_constants(self.model)
+        if not constant_data:
             return None
 
-        constant_data = {}
-        for name, vals in constant_data_vars.items():
-            if hasattr(vals, "get_value"):
-                vals = vals.get_value()
-            elif hasattr(vals, "data"):
-                vals = vals.data
-            constant_data[name] = vals
-
-        return dict_to_dataset(
+        xarray_dataset = dict_to_dataset(
             constant_data,
             library=pymc,
             coords=self.coords,
             dims=self.dims,
             default_dims=[],
         )
+
+        # provisional handling of scalars in constant
+        # data to prevent promotion to rank 1
+        # in the future this will be handled by arviz
+        scalars = [var_name for var_name, value in constant_data.items() if np.ndim(value) == 0]
+        for s in scalars:
+            s_dim_0_name = f"{s}_dim_0"
+            xarray_dataset = xarray_dataset.squeeze(s_dim_0_name, drop=True)
+
+        return xarray_dataset
 
     def to_inference_data(self):
         """Convert all available data to an InferenceData object.
@@ -521,7 +423,6 @@ class InferenceDataConverter:  # pylint: disable=too-many-instance-attributes
         id_dict = {
             "posterior": self.posterior_to_xarray(),
             "sample_stats": self.sample_stats_to_xarray(),
-            "log_likelihood": self.log_likelihood_to_xarray(),
             "posterior_predictive": self.posterior_predictive_to_xarray(),
             "predictions": self.predictions_to_xarray(),
             **self.priors_to_xarray(),
@@ -531,19 +432,45 @@ class InferenceDataConverter:  # pylint: disable=too-many-instance-attributes
             id_dict["predictions_constant_data"] = self.constant_data_to_xarray()
         else:
             id_dict["constant_data"] = self.constant_data_to_xarray()
-        return InferenceData(save_warmup=self.save_warmup, **id_dict)
+        idata = InferenceData(save_warmup=self.save_warmup, **id_dict)
+        if self.log_likelihood:
+            from pymc.stats.log_density import compute_log_likelihood
+
+            idata = compute_log_likelihood(
+                idata,
+                var_names=None if self.log_likelihood is True else self.log_likelihood,
+                extend_inferencedata=True,
+                model=self.model,
+                sample_dims=self.sample_dims,
+                progressbar=False,
+            )
+        if self.log_prior:
+            from pymc.stats.log_density import compute_log_prior
+
+            idata = compute_log_prior(
+                idata,
+                var_names=None if self.log_prior is True else self.log_prior,
+                extend_inferencedata=True,
+                model=self.model,
+                sample_dims=self.sample_dims,
+                progressbar=False,
+            )
+        return idata
 
 
 def to_inference_data(
     trace: Optional["MultiTrace"] = None,
     *,
-    prior: Optional[Mapping[str, Any]] = None,
-    posterior_predictive: Optional[Mapping[str, Any]] = None,
-    log_likelihood: Union[bool, Iterable[str]] = True,
-    coords: Optional[CoordSpec] = None,
-    dims: Optional[DimSpec] = None,
+    prior: Mapping[str, Any] | None = None,
+    posterior_predictive: Mapping[str, Any] | None = None,
+    log_likelihood: bool | Iterable[str] = False,
+    log_prior: bool | Iterable[str] = False,
+    coords: CoordSpec | None = None,
+    dims: DimSpec | None = None,
+    sample_dims: list | None = None,
     model: Optional["Model"] = None,
-    save_warmup: Optional[bool] = None,
+    save_warmup: bool | None = None,
+    include_transformed: bool = False,
 ) -> InferenceData:
     """Convert pymc data into an InferenceData object.
 
@@ -564,8 +491,11 @@ def to_inference_data(
         Dictionary with the variable names as keys, and values numpy arrays
         containing posterior predictive samples.
     log_likelihood : bool or array_like of str, optional
-        List of variables to calculate `log_likelihood`. Defaults to True which calculates
-        `log_likelihood` for all observed variables. If set to False, log_likelihood is skipped.
+        List of variables to calculate `log_likelihood`. Defaults to False.
+        If set to True, computes `log_likelihood` for all observed variables.
+    log_prior : bool or array_like of str, optional
+        List of variables to calculate `log_prior`. Defaults to False.
+        If set to True, computes `log_prior` for all unobserved variables.
     coords : dict of {str: array-like}, optional
         Map of coordinate names to coordinate values
     dims : dict of {str: list of str}, optional
@@ -576,6 +506,9 @@ def to_inference_data(
     save_warmup : bool, optional
         Save warmup iterations InferenceData object. If not defined, use default
         defined by the rcParams.
+    include_transformed : bool, optional
+        Save the transformed parameters in the InferenceData object. By default, these are
+        not saved.
 
     Returns
     -------
@@ -589,10 +522,13 @@ def to_inference_data(
         prior=prior,
         posterior_predictive=posterior_predictive,
         log_likelihood=log_likelihood,
+        log_prior=log_prior,
         coords=coords,
         dims=dims,
+        sample_dims=sample_dims,
         model=model,
         save_warmup=save_warmup,
+        include_transformed=include_transformed,
     ).to_inference_data()
 
 
@@ -602,9 +538,10 @@ def predictions_to_inference_data(
     predictions,
     posterior_trace: Optional["MultiTrace"] = None,
     model: Optional["Model"] = None,
-    coords: Optional[CoordSpec] = None,
-    dims: Optional[DimSpec] = None,
-    idata_orig: Optional[InferenceData] = None,
+    coords: CoordSpec | None = None,
+    dims: DimSpec | None = None,
+    sample_dims: list | None = None,
+    idata_orig: InferenceData | None = None,
     inplace: bool = False,
 ) -> InferenceData:
     """Translate out-of-sample predictions into ``InferenceData``.
@@ -621,7 +558,7 @@ def predictions_to_inference_data(
         a deterministic function of the shape of any predictor (explanatory, independent, etc.)
         variables must be *removed* from this trace.
     model: Model
-        The pymc model. It can be ommited if within a model context.
+        The pymc model. It can be omitted if within a model context.
     coords: Dict[str, array-like[Any]]
         Coordinates for the variables.  Map from coordinate names to coordinate values.
     dims: Dict[str, array-like[str]]
@@ -649,12 +586,13 @@ def predictions_to_inference_data(
         model=model,
         coords=coords,
         dims=dims,
+        sample_dims=sample_dims,
         log_likelihood=False,
     )
     if hasattr(idata_orig, "posterior"):
         assert idata_orig is not None
-        converter.nchains = idata_orig["posterior"].dims["chain"]
-        converter.ndraws = idata_orig["posterior"].dims["draw"]
+        converter.nchains = idata_orig["posterior"].sizes["chain"]
+        converter.ndraws = idata_orig["posterior"].sizes["draw"]
     else:
         aelem = next(iter(predictions.values()))
         converter.nchains, converter.ndraws = aelem.shape[:2]
@@ -669,3 +607,75 @@ def predictions_to_inference_data(
         # data and return that.
         concat([new_idata, idata_orig], dim=None, copy=True, inplace=True)
         return new_idata
+
+
+def dataset_to_point_list(
+    ds: xarray.Dataset | dict[str, xarray.DataArray], sample_dims: Sequence[str]
+) -> tuple[list[dict[str, np.ndarray]], dict[str, Any]]:
+    # All keys of the dataset must be a str
+    var_names = cast(list[str], list(ds.keys()))
+    for vn in var_names:
+        if not isinstance(vn, str):
+            raise ValueError(f"Variable names must be str, but dataset key {vn} is a {type(vn)}.")
+    num_sample_dims = len(sample_dims)
+    stacked_dims = {dim_name: ds[var_names[0]][dim_name] for dim_name in sample_dims}
+    transposed_dict = {vn: da.transpose(*sample_dims, ...) for vn, da in ds.items()}
+    stacked_dict = {
+        vn: da.values.reshape((-1, *da.shape[num_sample_dims:]))
+        for vn, da in transposed_dict.items()
+    }
+    points = [
+        {vn: stacked_dict[vn][i, ...] for vn in var_names}
+        for i in range(np.prod([len(coords) for coords in stacked_dims.values()]))
+    ]
+    # use the list of points
+    return cast(list[dict[str, np.ndarray]], points), stacked_dims
+
+
+def apply_function_over_dataset(
+    fn: PointFunc,
+    dataset: Dataset,
+    *,
+    output_var_names: Sequence[str],
+    coords,
+    dims,
+    sample_dims: Sequence[str] = ("chain", "draw"),
+    progressbar: bool = True,
+    progressbar_theme: Theme | None = default_progress_theme,
+) -> Dataset:
+    posterior_pts, stacked_dims = dataset_to_point_list(dataset, sample_dims)
+
+    n_pts = len(posterior_pts)
+    out_dict = _DefaultTrace(n_pts)
+    indices = range(n_pts)
+
+    with CustomProgress(
+        console=Console(theme=progressbar_theme), disable=not progressbar
+    ) as progress:
+        task = progress.add_task("Computing ...", total=n_pts)
+        for idx in indices:
+            out = fn(posterior_pts[idx])
+            fn.f.trust_input = True  # If we arrive here the dtypes are valid
+            for var_name, val in zip(output_var_names, out, strict=True):
+                out_dict.insert(var_name, val, idx)
+
+            progress.advance(task)
+        progress.update(task, refresh=True, completed=n_pts)
+
+    out_trace = out_dict.trace_dict
+    for key, val in out_trace.items():
+        out_trace[key] = val.reshape(
+            (
+                *[len(coord) for coord in stacked_dims.values()],
+                *val.shape[1:],
+            )
+        )
+
+    return dict_to_dataset(
+        out_trace,
+        library=pymc,
+        dims=dims,
+        coords=coords,
+        default_dims=list(sample_dims),
+        skip_event_dims=True,
+    )

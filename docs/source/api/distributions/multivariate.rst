@@ -5,18 +5,21 @@ Multivariate
 .. currentmodule:: pymc
 .. autosummary::
    :toctree: generated
+   :template: distribution.rst
 
+   CAR
+   Dirichlet
+   DirichletMultinomial
+   ICAR
+   KroneckerNormal
+   LKJCholeskyCov
+   LKJCorr
+   MatrixNormal
+   Multinomial
    MvNormal
    MvStudentT
-   Dirichlet
-   Multinomial
-   DirichletMultinomial
    OrderedMultinomial
+   StickBreakingWeights
    Wishart
    WishartBartlett
-   LKJCorr
-   LKJCholeskyCov
-   MatrixNormal
-   KroneckerNormal
-   CAR
-   StickBreakingWeights
+   ZeroSumNormal

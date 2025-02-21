@@ -6,9 +6,8 @@ Distribution utilities
 .. autosummary::
    :toctree: generated/
 
-    Distribution
-    SymbolicDistribution
-    Discrete
     Continuous
-    NoDistribution
-    DensityDist
+    Discrete
+    Distribution
+    SymbolicRandomVariable
+    DiracDelta

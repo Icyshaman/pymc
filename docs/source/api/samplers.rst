@@ -12,20 +12,19 @@ This submodule contains functions for MCMC and forward sampling.
    sample
    sample_prior_predictive
    sample_posterior_predictive
-   sample_posterior_predictive_w
-   sampling_jax.sample_blackjax_nuts
-   sampling_jax.sample_numpyro_nuts
-   iter_sample
-   init_nuts
    draw
+   compute_deterministics
+   init_nuts
+   sampling.jax.sample_blackjax_nuts
+   sampling.jax.sample_numpyro_nuts
+
 
 Step methods
 ************
 
-.. currentmodule:: pymc
-
 HMC family
 ----------
+.. currentmodule:: pymc.step_methods.hmc
 
 .. autosummary::
    :toctree: generated/
@@ -35,6 +34,7 @@ HMC family
 
 Metropolis family
 -----------------
+.. currentmodule:: pymc.step_methods
 
 .. autosummary::
     :toctree: generated/
@@ -52,23 +52,12 @@ Metropolis family
     PoissonProposal
     UniformProposal
 
-MLDA family
------------
-
-.. autosummary::
-   :toctree: generated/
-
-   MLDA
-   DEMetropolisZMLDA
-   MetropolisMLDA
-   RecursiveDAProposal
-
 Other step methods
 ------------------
+.. currentmodule:: pymc.step_methods
 
 .. autosummary::
    :toctree: generated/
 
    CompoundStep
-   EllipticalSlice
    Slice

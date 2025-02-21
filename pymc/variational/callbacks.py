@@ -1,4 +1,4 @@
-#   Copyright 2020 The PyMC Developers
+#   Copyright 2024 - present The PyMC Developers
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
@@ -14,6 +14,8 @@
 
 import collections
 
+from collections.abc import Callable
+
 import numpy as np
 
 __all__ = ["Callback", "CheckParametersConvergence", "Tracker"]
@@ -24,19 +26,24 @@ class Callback:
         raise NotImplementedError
 
 
-def relative(current, prev, eps=1e-6):
-    return (np.abs(current - prev) + eps) / (np.abs(prev) + eps)
+def relative(current: np.ndarray, prev: np.ndarray, eps=1e-6) -> np.ndarray:
+    diff = current - prev
+    return (np.abs(diff) + eps) / (np.abs(prev) + eps)
 
 
-def absolute(current, prev):
-    return np.abs(current - prev)
+def absolute(current: np.ndarray, prev: np.ndarray) -> np.ndarray:
+    diff = current - prev
+    return np.abs(diff)
 
 
-_diff = dict(relative=relative, absolute=absolute)
+_diff: dict[str, Callable[[np.ndarray, np.ndarray], np.ndarray]] = {
+    "relative": relative,
+    "absolute": absolute,
+}
 
 
 class CheckParametersConvergence(Callback):
-    """Convergence stopping check
+    """Convergence stopping check.
 
     Parameters
     ----------
@@ -53,11 +60,8 @@ class CheckParametersConvergence(Callback):
     --------
     >>> with model:
     ...     approx = pm.fit(
-    ...         n=10000, callbacks=[
-    ...             CheckParametersConvergence(
-    ...                 every=50, diff='absolute',
-    ...                 tolerance=1e-4)
-    ...         ]
+    ...         n=10000,
+    ...         callbacks=[CheckParametersConvergence(every=50, diff="absolute", tolerance=1e-4)],
     ...     )
     """
 
@@ -68,7 +72,7 @@ class CheckParametersConvergence(Callback):
         self.prev = None
         self.tolerance = tolerance
 
-    def __call__(self, approx, _, i):
+    def __call__(self, approx, _, i) -> None:
         if self.prev is None:
             self.prev = self.flatten_shared(approx.params)
             return
@@ -76,11 +80,11 @@ class CheckParametersConvergence(Callback):
             return
         current = self.flatten_shared(approx.params)
         prev = self.prev
-        delta = self._diff(current, prev)  # type: np.ndarray
+        delta: np.ndarray = self._diff(current, prev)
         self.prev = current
         norm = np.linalg.norm(delta, self.ord)
         if norm < self.tolerance:
-            raise StopIteration("Convergence achieved at %d" % i)
+            raise StopIteration(f"Convergence achieved at {i}")
 
     @staticmethod
     def flatten_shared(shared_list):
@@ -89,7 +93,7 @@ class CheckParametersConvergence(Callback):
 
 class Tracker(Callback):
     """
-    Helper class to record arbitrary stats during VI
+    Helper class to record arbitrary stats during VI.
 
     It is possible to pass a function that takes no arguments
     If call fails then (approx, hist, i) are passed
@@ -145,6 +149,7 @@ class Tracker(Callback):
         self.hist = collections.defaultdict(list)
 
     def __getitem__(self, item):
+        """Get the element at index `item`."""
         return self.hist[item]
 
     __call__ = record

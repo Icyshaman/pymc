@@ -1,4 +1,4 @@
-#   Copyright 2020 The PyMC Developers
+#   Copyright 2024 - present The PyMC Developers
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
@@ -12,15 +12,19 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-"""
-pymc.blocking
+"""Classes for working with subsets of parameters."""
 
-Classes for working with subsets of parameters.
-"""
-import collections
+from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from functools import partial
-from typing import Callable, Dict, Optional, TypeVar
+from typing import (
+    Any,
+    Generic,
+    NamedTuple,
+    TypeAlias,
+    TypeVar,
+)
 
 import numpy as np
 
@@ -28,17 +32,22 @@ __all__ = ["DictToArrayBijection"]
 
 
 T = TypeVar("T")
-PointType = Dict[str, np.ndarray]
+PointType: TypeAlias = dict[str, np.ndarray]
+StatsDict: TypeAlias = dict[str, Any]
+StatsType: TypeAlias = list[StatsDict]
+StatDtype: TypeAlias = type | np.dtype
+StatShape: TypeAlias = Sequence[int | None] | None
 
-# `point_map_info` is a tuple of tuples containing `(name, shape, dtype)` for
+
+# `point_map_info` is a tuple of tuples containing `(name, shape, size, dtype)` for
 # each of the raveled variables.
-RaveledVars = collections.namedtuple("RaveledVars", "data, point_map_info")
+class RaveledVars(NamedTuple):
+    data: np.ndarray
+    point_map_info: tuple[tuple[str, tuple[int, ...], int, np.dtype], ...]
 
 
-class Compose:
-    """
-    Compose two functions in a pickleable way
-    """
+class Compose(Generic[T]):
+    """Compose two functions in a pickleable way."""
 
     def __init__(self, fa: Callable[[PointType], T], fb: Callable[[RaveledVars], PointType]):
         self.fa = fa
@@ -58,10 +67,9 @@ class DictToArrayBijection:
     @staticmethod
     def map(var_dict: PointType) -> RaveledVars:
         """Map a dictionary of names and variables to a concatenated 1D array space."""
-        vars_info = tuple((v, k, v.shape, v.dtype) for k, v in var_dict.items())
-        raveled_vars = [v[0].ravel() for v in vars_info]
-        if raveled_vars:
-            result = np.concatenate(raveled_vars)
+        vars_info = tuple((v, k, v.shape, v.size, v.dtype) for k, v in var_dict.items())
+        if vars_info:
+            result = np.concatenate(tuple(v[0].ravel() for v in vars_info))
         else:
             result = np.array([])
         return RaveledVars(result, tuple(v[1:] for v in vars_info))
@@ -69,12 +77,12 @@ class DictToArrayBijection:
     @staticmethod
     def rmap(
         array: RaveledVars,
-        start_point: Optional[PointType] = None,
+        start_point: PointType | None = None,
     ) -> PointType:
         """Map 1D concatenated array to a dictionary of variables in their original spaces.
 
         Parameters
-        ==========
+        ----------
         array
             The array to map.
         start_point
@@ -82,25 +90,21 @@ class DictToArrayBijection:
 
         """
         if start_point:
-            result = dict(start_point)
+            result = start_point.copy()
         else:
             result = {}
 
-        if not isinstance(array, RaveledVars):
-            raise TypeError("`array` must be a `RaveledVars` type")
-
         last_idx = 0
-        for name, shape, dtype in array.point_map_info:
-            arr_len = np.prod(shape, dtype=int)
-            var = array.data[last_idx : last_idx + arr_len].reshape(shape).astype(dtype)
-            result[name] = var
-            last_idx += arr_len
+        for name, shape, size, dtype in array.point_map_info:
+            end = last_idx + size
+            result[name] = array.data[last_idx:end].reshape(shape).astype(dtype)
+            last_idx = end
 
         return result
 
     @classmethod
     def mapf(
-        cls, f: Callable[[PointType], T], start_point: Optional[PointType] = None
+        cls, f: Callable[[PointType], T], start_point: PointType | None = None
     ) -> Callable[[RaveledVars], T]:
         """Create a callable that first maps back to ``dict`` inputs and then applies a function.
 

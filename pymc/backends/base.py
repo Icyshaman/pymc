@@ -1,4 +1,4 @@
-#   Copyright 2020 The PyMC Developers
+#   Copyright 2024 - present The PyMC Developers
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
@@ -12,33 +12,129 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-"""Base backend for traces
+"""Base backend for traces.
 
 See the docstring for pymc.backends for more information
 """
+
 import itertools as itl
 import logging
 import warnings
 
 from abc import ABC
-from typing import List
+from collections.abc import Mapping, Sequence, Sized
+from typing import (
+    Any,
+    TypeVar,
+    cast,
+)
 
-import aesara.tensor as at
 import numpy as np
+import pytensor
 
-from pymc.backends.report import SamplerReport, merge_reports
+from pymc.backends.report import SamplerReport
 from pymc.model import modelcontext
+from pymc.pytensorf import compile
 from pymc.util import get_var_name
 
-logger = logging.getLogger("pymc")
+logger = logging.getLogger(__name__)
 
 
 class BackendError(Exception):
     pass
 
 
-class BaseTrace(ABC):
-    """Base trace object
+class IBaseTrace(ABC, Sized):
+    """Minimal interface needed to record and access draws and stats for one MCMC chain."""
+
+    chain: int
+    """Chain number."""
+
+    varnames: list[str]
+    """Names of tracked variables."""
+
+    sampler_vars: list[dict[str, type | np.dtype]]
+    """Sampler stats for each sampler."""
+
+    def __len__(self):
+        """Length of the chain."""
+        raise NotImplementedError()
+
+    def get_values(self, varname: str, burn=0, thin=1) -> np.ndarray:
+        """Get values from trace.
+
+        Parameters
+        ----------
+        varname: str
+        burn: int
+        thin: int
+
+        Returns
+        -------
+        A NumPy array
+        """
+        raise NotImplementedError()
+
+    def get_sampler_stats(
+        self, stat_name: str, sampler_idx: int | None = None, burn=0, thin=1
+    ) -> np.ndarray:
+        """Get sampler statistics from the trace.
+
+        Parameters
+        ----------
+        stat_name : str
+            Name of the stat to fetch.
+        sampler_idx : int or None
+            Index of the sampler to get the stat from.
+        burn : int
+            Draws to skip from the start.
+        thin : int
+            Stepsize for the slice.
+
+        Returns
+        -------
+        stats : np.ndarray
+            If `sampler_idx` was specified, the shape should be `(draws,)`.
+            Otherwise, the shape should be `(draws, samplers)`.
+        """
+        raise NotImplementedError()
+
+    def _slice(self, idx: slice) -> "IBaseTrace":
+        """Slice trace object."""
+        raise NotImplementedError()
+
+    def point(self, idx: int) -> dict[str, np.ndarray]:
+        """Return point values at `idx` for current chain.
+
+        Returns
+        -------
+        values : dict[str, np.ndarray]
+            Dictionary of values with variable names as keys.
+        """
+        raise NotImplementedError()
+
+    def record(self, draw: Mapping[str, np.ndarray], stats: Sequence[Mapping[str, Any]]):
+        """Record results of a sampling iteration.
+
+        Parameters
+        ----------
+        draw: dict
+            Values mapped to variable names
+        stats: list of dicts
+            The diagnostic values for each sampler
+        """
+        raise NotImplementedError()
+
+    def close(self):
+        """Close the backend.
+
+        This is called after sampling has finished.
+        """
+        pass
+
+
+class BaseTrace(IBaseTrace):
+    """Base trace object.
 
     Parameters
     ----------
@@ -53,45 +149,58 @@ class BaseTrace(ABC):
         use different test point that might be with changed variables shapes
     """
 
-    supports_sampler_stats = False
-
-    def __init__(self, name, model=None, vars=None, test_point=None):
-        self.name = name
-
+    def __init__(
+        self,
+        name=None,
+        model=None,
+        vars=None,
+        test_point=None,
+        *,
+        fn=None,
+        var_shapes=None,
+        var_dtypes=None,
+    ):
         model = modelcontext(model)
-        self.model = model
+
         if vars is None:
             vars = model.unobserved_value_vars
 
-        self.vars = vars
-        self.varnames = [var.name for var in vars]
-        self.fn = model.compile_fn(vars, inputs=model.value_vars, on_unused_input="ignore")
+        unnamed_vars = {var for var in vars if var.name is None}
+        if unnamed_vars:
+            raise Exception(f"Can't trace unnamed variables: {unnamed_vars}")
+
+        if fn is None:
+            # borrow=True avoids deepcopy when inputs=output which is the case for untransformed value variables
+            fn = compile(
+                inputs=[pytensor.In(v, borrow=True) for v in model.value_vars],
+                outputs=[pytensor.Out(v, borrow=True) for v in vars],
+                on_unused_input="ignore",
+            )
+            fn.trust_input = True
 
         # Get variable shapes. Most backends will need this
         # information.
-        if test_point is None:
-            test_point = model.initial_point()
-        else:
-            test_point_ = model.initial_point().copy()
-            test_point_.update(test_point)
-            test_point = test_point_
-        var_values = list(zip(self.varnames, self.fn(test_point)))
-        self.var_shapes = {var: value.shape for var, value in var_values}
-        self.var_dtypes = {var: value.dtype for var, value in var_values}
+        if var_shapes is None or var_dtypes is None:
+            if test_point is None:
+                test_point = model.initial_point()
+            var_values = tuple(zip(vars, fn(**test_point)))
+            var_shapes = {var.name: value.shape for var, value in var_values}
+            var_dtypes = {var.name: value.dtype for var, value in var_values}
+
+        self.name = name
+        self.model = model
+        self.fn = fn
+        self.vars = vars
+        self.varnames = [var.name for var in vars]
+        self.var_shapes = var_shapes
+        self.var_dtypes = var_dtypes
         self.chain = None
         self._is_base_setup = False
         self.sampler_vars = None
-        self._warnings = []
-
-    def _add_warnings(self, warnings):
-        self._warnings.extend(warnings)
 
     # Sampling methods
 
     def _set_sampler_vars(self, sampler_vars):
-        if sampler_vars is not None and not self.supports_sampler_stats:
-            raise ValueError("Backend does not support sampler stats.")
-
         if self._is_base_setup and self.sampler_vars != sampler_vars:
             raise ValueError("Can't change sampler_vars")
 
@@ -103,11 +212,10 @@ class BaseTrace(ABC):
         for stats in sampler_vars:
             for key, dtype in stats.items():
                 if dtypes.setdefault(key, dtype) != dtype:
-                    raise ValueError("Sampler statistic %s appears with " "different types." % key)
+                    raise ValueError(f"Sampler statistic {key} appears with different types.")
 
         self.sampler_vars = sampler_vars
 
-    # pylint: disable=unused-argument
     def setup(self, draws, chain, sampler_vars=None) -> None:
         """Perform chain-specific setup.
 
@@ -118,35 +226,15 @@ class BaseTrace(ABC):
         chain: int
             Chain number
         sampler_vars: list of dictionaries (name -> dtype), optional
-            Diagnostics / statistics for each sampler. Before passing this
-            to a backend, you should check, that the `supports_sampler_state`
-            flag is set.
+            Diagnostics / statistics for each sampler
         """
         self._set_sampler_vars(sampler_vars)
         self._is_base_setup = True
 
-    def record(self, point, sampler_states=None):
-        """Record results of a sampling iteration.
-
-        Parameters
-        ----------
-        point: dict
-            Values mapped to variable names
-        sampler_states: list of dicts
-            The diagnostic values for each sampler
-        """
-        raise NotImplementedError
-
-    def close(self):
-        """Close the database backend.
-
-        This is called after sampling has finished.
-        """
-        pass
-
     # Selection methods
 
     def __getitem__(self, idx):
+        """Get the sample at index `idx`."""
         if isinstance(idx, slice):
             return self._slice(idx)
 
@@ -155,51 +243,38 @@ class BaseTrace(ABC):
         except (ValueError, TypeError):  # Passed variable or variable name.
             raise ValueError("Can only index with slice or integer")
 
-    def __len__(self):
-        raise NotImplementedError
-
-    def get_values(self, varname, burn=0, thin=1):
-        """Get values from trace.
-
-        Parameters
-        ----------
-        varname: str
-        burn: int
-        thin: int
-
-        Returns
-        -------
-        A NumPy array
-        """
-        raise NotImplementedError
-
-    def get_sampler_stats(self, stat_name, sampler_idx=None, burn=0, thin=1):
+    def get_sampler_stats(
+        self, stat_name: str, sampler_idx: int | None = None, burn=0, thin=1
+    ) -> np.ndarray:
         """Get sampler statistics from the trace.
 
+        Note: This implementation attempts to squeeze object arrays into a consistent dtype,
+        #     which can change their shape in hard-to-predict ways.
+        #     See https://github.com/pymc-devs/pymc/issues/6207
+
         Parameters
         ----------
-        stat_name: str
-        sampler_idx: int or None
-        burn: int
-        thin: int
+        stat_name : str
+            Name of the stat to fetch.
+        sampler_idx : int or None
+            Index of the sampler to get the stat from.
+        burn : int
+            Draws to skip from the start.
+        thin : int
+            Stepsize for the slice.
 
         Returns
         -------
-        If the `sampler_idx` is specified, return the statistic with
-        the given name in a numpy array. If it is not specified and there
-        is more than one sampler that provides this statistic, return
-        a numpy array of shape (m, n), where `m` is the number of
-        such samplers, and `n` is the number of samples.
+        stats : np.ndarray
+            If `sampler_idx` was specified, the shape should be `(draws,)`.
+            Otherwise, the shape should be `(draws, samplers)`.
         """
-        if not self.supports_sampler_stats:
-            raise ValueError("This backend does not support sampler stats")
-
         if sampler_idx is not None:
             return self._get_sampler_stats(stat_name, sampler_idx, burn, thin)
 
         sampler_idxs = [i for i, s in enumerate(self.sampler_vars) if stat_name in s]
         if not sampler_idxs:
-            raise KeyError("Unknown sampler stat %s" % stat_name)
+            raise KeyError(f"Unknown sampler stat {stat_name}")
 
         vals = np.stack(
             [self._get_sampler_stats(stat_name, i, burn, thin) for i in sampler_idxs], axis=-1
@@ -210,36 +285,26 @@ class BaseTrace(ABC):
 
         if vals.dtype == np.dtype(object):
             try:
-                vals = np.vstack(vals)
+                vals = np.vstack(list(vals))
             except ValueError:
                 # Most likely due to non-identical shapes. Just stick with the object-array.
                 pass
 
         return vals
 
-    def _get_sampler_stats(self, stat_name, sampler_idx, burn, thin):
+    def _get_sampler_stats(
+        self, stat_name: str, sampler_idx: int, burn: int, thin: int
+    ) -> np.ndarray:
         """Get sampler statistics."""
         raise NotImplementedError()
 
-    def _slice(self, idx):
-        """Slice trace object."""
-        raise NotImplementedError()
-
-    def point(self, idx):
-        """Return dictionary of point values at `idx` for current chain
-        with variables names as keys.
-        """
-        raise NotImplementedError()
-
     @property
-    def stat_names(self):
-        if self.supports_sampler_stats:
-            names = set()
-            for vars in self.sampler_vars or []:
-                names.update(vars.keys())
-            return names
-        else:
-            return set()
+    def stat_names(self) -> set[str]:
+        names: set[str] = set()
+        for vars in self.sampler_vars or []:
+            names.update(vars.keys())
+
+        return names
 
 
 class MultiTrace:
@@ -293,38 +358,36 @@ class MultiTrace:
         List of variable names in the trace(s)
     """
 
-    def __init__(self, straces):
-        self._straces = {}
-        for strace in straces:
-            if strace.chain in self._straces:
-                raise ValueError("Chains are not unique.")
-            self._straces[strace.chain] = strace
+    def __init__(self, straces: Sequence[IBaseTrace]):
+        if len({t.chain for t in straces}) != len(straces):
+            raise ValueError("Chains are not unique.")
+        self._straces = {t.chain: t for t in straces}
 
         self._report = SamplerReport()
-        for strace in straces:
-            if hasattr(strace, "_warnings"):
-                self._report._add_warnings(strace._warnings, strace.chain)
 
     def __repr__(self):
+        """Return a string representation of MultiTrace."""
         template = "<{}: {} chains, {} iterations, {} variables>"
         return template.format(self.__class__.__name__, self.nchains, len(self), len(self.varnames))
 
     @property
-    def nchains(self):
+    def nchains(self) -> int:
         return len(self._straces)
 
     @property
-    def chains(self):
-        return list(sorted(self._straces.keys()))
+    def chains(self) -> list[int]:
+        return sorted(self._straces.keys())
 
     @property
-    def report(self):
+    def report(self) -> SamplerReport:
         return self._report
 
     def __iter__(self):
+        """Return an iterator of the MultiTrace."""
         raise NotImplementedError
 
     def __getitem__(self, idx):
+        """Get the sample at index `idx`."""
         if isinstance(idx, slice):
             return self._slice(idx)
 
@@ -348,18 +411,19 @@ class MultiTrace:
         if var in self.varnames:
             if var in self.stat_names:
                 warnings.warn(
-                    "Attribute access on a trace object is ambigous. "
+                    "Attribute access on a trace object is ambiguous. "
                     "Sampler statistic and model variable share a name. Use "
                     "trace.get_values or trace.get_sampler_stats."
                 )
             return self.get_values(var, burn=burn, thin=thin)
         if var in self.stat_names:
             return self.get_sampler_stats(var, burn=burn, thin=thin)
-        raise KeyError("Unknown variable %s" % var)
+        raise KeyError(f"Unknown variable {var}")
 
-    _attrs = {"_straces", "varnames", "chains", "stat_names", "supports_sampler_stats", "_report"}
+    _attrs = {"_straces", "varnames", "chains", "stat_names", "_report"}
 
     def __getattr__(self, name):
+        """Get the value of the attribute of name `name`."""
         # Avoid infinite recursion when called before __init__
         # variables are set up (e.g., when pickling).
         if name in self._attrs:
@@ -369,7 +433,7 @@ class MultiTrace:
         if name in self.varnames:
             if name in self.stat_names:
                 warnings.warn(
-                    "Attribute access on a trace object is ambigous. "
+                    "Attribute access on a trace object is ambiguous. "
                     "Sampler statistic and model variable share a name. Use "
                     "trace.get_values or trace.get_sampler_stats."
                 )
@@ -379,22 +443,23 @@ class MultiTrace:
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
     def __len__(self):
+        """Length of the chains."""
         chain = self.chains[-1]
         return len(self._straces[chain])
 
     @property
-    def varnames(self):
+    def varnames(self) -> list[str]:
         chain = self.chains[-1]
         return self._straces[chain].varnames
 
     @property
-    def stat_names(self):
+    def stat_names(self) -> set[str]:
         if not self._straces:
             return set()
         sampler_vars = [s.sampler_vars for s in self._straces.values()]
         if not all(svars == sampler_vars[0] for svars in sampler_vars):
             raise ValueError("Inividual chains contain different sampler stats")
-        names = set()
+        names: set[str] = set()
         for trace in self._straces.values():
             if trace.sampler_vars is None:
                 continue
@@ -402,74 +467,15 @@ class MultiTrace:
                 names.update(vars.keys())
         return names
 
-    def add_values(self, vals, overwrite=False) -> None:
-        """Add variables to traces.
-
-        Parameters
-        ----------
-        vals: dict (str: array-like)
-             The keys should be the names of the new variables. The values are expected to be
-             array-like objects. For traces with more than one chain the length of each value
-             should match the number of total samples already in the trace `(chains * iterations)`,
-             otherwise a warning is raised.
-        overwrite: bool
-            If `False` (default) a ValueError is raised if the variable already exists.
-            Change to `True` to overwrite the values of variables
-
-        Returns
-        -------
-            None.
-        """
-        for k, v in vals.items():
-            new_var = 1
-            if k in self.varnames:
-                if overwrite:
-                    self.varnames.remove(k)
-                    new_var = 0
-                else:
-                    raise ValueError(f"Variable name {k} already exists.")
-
-            self.varnames.append(k)
-
-            chains = self._straces
-            l_samples = len(self) * len(self.chains)
-            l_v = len(v)
-            if l_v != l_samples:
-                warnings.warn(
-                    "The length of the values you are trying to "
-                    "add ({}) does not match the number ({}) of "
-                    "total samples in the trace "
-                    "(chains * iterations)".format(l_v, l_samples)
-                )
-
-            v = np.squeeze(v.reshape(len(chains), len(self), -1))
-
-            for idx, chain in enumerate(chains.values()):
-                if new_var:
-                    dummy = at.as_tensor_variable([], k)
-                    chain.vars.append(dummy)
-                chain.samples[k] = v[idx]
-
-    def remove_values(self, name):
-        """remove variables from traces.
-
-        Parameters
-        ----------
-        name: str
-            Name of the variable to remove. Raises KeyError if the variable is not present
-        """
-        varnames = self.varnames
-        if name not in varnames:
-            raise KeyError(f"Unknown variable {name}")
-        self.varnames.remove(name)
-        chains = self._straces
-        for chain in chains.values():
-            for va in chain.vars:
-                if va.name == name:
-                    chain.vars.remove(va)
-                    del chain.samples[name]
-
-    def get_values(self, varname, burn=0, thin=1, combine=True, chains=None, squeeze=True):
+    def get_values(
+        self,
+        varname: str,
+        burn: int = 0,
+        thin: int = 1,
+        combine: bool = True,
+        chains: int | Sequence[int] | None = None,
+        squeeze: bool = True,
+    ) -> list[np.ndarray]:
         """Get values from traces.
 
         Parameters
@@ -495,38 +501,54 @@ class MultiTrace:
         if chains is None:
             chains = self.chains
         varname = get_var_name(varname)
-        try:
-            results = [self._straces[chain].get_values(varname, burn, thin) for chain in chains]
-        except TypeError:  # Single chain passed.
-            results = [self._straces[chains].get_values(varname, burn, thin)]
+        if isinstance(chains, int):
+            chains = [chains]
+        results = [self._straces[chain].get_values(varname, burn, thin) for chain in chains]
         return _squeeze_cat(results, combine, squeeze)
 
-    def get_sampler_stats(self, stat_name, burn=0, thin=1, combine=True, chains=None, squeeze=True):
+    def get_sampler_stats(
+        self,
+        stat_name: str,
+        burn: int = 0,
+        thin: int = 1,
+        combine: bool = True,
+        chains: int | Sequence[int] | None = None,
+        squeeze: bool = True,
+    ) -> list[np.ndarray] | np.ndarray:
         """Get sampler statistics from the trace.
+
+        Note: This implementation attempts to squeeze object arrays into a consistent dtype,
+        #     which can change their shape in hard-to-predict ways.
+        #     See https://github.com/pymc-devs/pymc/issues/6207
 
         Parameters
         ----------
-        stat_name: str
-        sampler_idx: int or None
-        burn: int
-        thin: int
+        stat_name : str
+            Name of the stat to fetch.
+        sampler_idx : int or None
+            Index of the sampler to get the stat from.
+        burn : int
+            Draws to skip from the start.
+        thin : int
+            Stepsize for the slice.
+        combine : bool
+            If True, results from `chains` will be concatenated.
+        squeeze : bool
+            Return a single array element if the resulting list of
+            values only has one element. If False, the result will
+            always be a list of arrays, even if `combine` is True.
 
         Returns
         -------
-        If the `sampler_idx` is specified, return the statistic with
-        the given name in a numpy array. If it is not specified and there
-        is more than one sampler that provides this statistic, return
-        a numpy array of shape (m, n), where `m` is the number of
-        such samplers, and `n` is the number of samples.
+        stats : np.ndarray
+            List or ndarray depending on parameters.
         """
         if stat_name not in self.stat_names:
-            raise KeyError("Unknown sampler statistic %s" % stat_name)
+            raise KeyError(f"Unknown sampler statistic {stat_name}")
 
         if chains is None:
             chains = self.chains
-        try:
-            chains = iter(chains)
-        except TypeError:
+        if isinstance(chains, int):
             chains = [chains]
 
         results = [
@@ -534,7 +556,7 @@ class MultiTrace:
         ]
         return _squeeze_cat(results, combine, squeeze)
 
-    def _slice(self, slice):
+    def _slice(self, slice: slice):
         """Return a new MultiTrace object sliced according to `slice`."""
         new_traces = [trace._slice(slice) for trace in self._straces.values()]
         trace = MultiTrace(new_traces)
@@ -542,7 +564,7 @@ class MultiTrace:
         trace._report = self._report._slice(*idxs)
         return trace
 
-    def point(self, idx, chain=None):
+    def point(self, idx: int, chain: int | None = None) -> dict[str, np.ndarray]:
         """Return a dictionary of point values at `idx`.
 
         Parameters
@@ -556,12 +578,12 @@ class MultiTrace:
         return self._straces[chain].point(idx)
 
     def points(self, chains=None):
-        """Return an iterator over all or some of the sample points
+        """Return an iterator over all or some of the sample points.
 
         Parameters
         ----------
         chains: list of int or N
-            The chains whose points should be inlcuded in the iterator.  If
+            The chains whose points should be included in the iterator.  If
             chains is not given, include points from all chains.
         """
         if chains is None:
@@ -570,46 +592,8 @@ class MultiTrace:
         return itl.chain.from_iterable(self._straces[chain] for chain in chains)
 
 
-def merge_traces(mtraces: List[MultiTrace]) -> MultiTrace:
-    """Merge MultiTrace objects.
-
-    Parameters
-    ----------
-    mtraces: list of MultiTraces
-        Each instance should have unique chain numbers.
-
-    Raises
-    ------
-    A ValueError is raised if any traces have overlapping chain numbers,
-    or if chains are of different lengths.
-
-    Returns
-    -------
-    A MultiTrace instance with merged chains
-    """
-    if len(mtraces) == 0:
-        raise ValueError("Cannot merge an empty set of traces.")
-    base_mtrace = mtraces[0]
-    chain_len = len(base_mtrace)
-    # check base trace
-    if any(
-        len(st) != chain_len for _, st in base_mtrace._straces.items()
-    ):  # pylint: disable=line-too-long
-        raise ValueError("Chains are of different lengths.")
-    for new_mtrace in mtraces[1:]:
-        for new_chain, strace in new_mtrace._straces.items():
-            if new_chain in base_mtrace._straces:
-                raise ValueError("Chains are not unique.")
-            if len(strace) != chain_len:
-                raise ValueError("Chains are of different lengths.")
-            base_mtrace._straces[new_chain] = strace
-    base_mtrace._report = merge_reports([trace.report for trace in mtraces])
-    return base_mtrace
-
-
-def _squeeze_cat(results, combine, squeeze):
-    """Squeeze and concatenate the results depending on values of
-    `combine` and `squeeze`."""
+def _squeeze_cat(results, combine: bool, squeeze: bool):
+    """Squeeze and/or concatenate the results."""
     if combine:
         results = np.concatenate(results)
         if not squeeze:
@@ -618,3 +602,33 @@ def _squeeze_cat(results, combine, squeeze):
         if squeeze and len(results) == 1:
             results = results[0]
     return results
+
+
+S = TypeVar("S", bound=Sized)
+
+
+def _choose_chains(traces: Sequence[S], tune: int) -> tuple[list[S], int]:
+    """
+    Filter and slice traces such that (n_traces * len(shortest_trace)) is maximized.
+
+    We get here after a ``KeyboardInterrupt``, and so the different
+    traces have different lengths. We therefore pick the number of
+    traces such that (number of traces) * (length of shortest trace)
+    is maximised.
+    """
+    if not traces:
+        raise ValueError("No traces to slice.")
+
+    lengths = [max(0, len(trace) - tune) for trace in traces]
+    if not sum(lengths):
+        raise ValueError("Not enough samples to build a trace.")
+
+    idxs = np.argsort(lengths)
+    l_sort = np.array(lengths)[idxs]
+
+    use_until = cast(int, np.argmax(l_sort * np.arange(1, l_sort.shape[0] + 1)[::-1]))
+    final_length = l_sort[use_until]
+
+    take_idx = cast(Sequence[int], idxs[use_until:])
+    sliced_traces = [traces[idx] for idx in take_idx]
+    return sliced_traces, final_length + tune

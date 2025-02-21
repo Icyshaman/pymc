@@ -1,4 +1,4 @@
-#   Copyright 2021 The PyMC Developers
+#   Copyright 2024 - present The PyMC Developers
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ Diagnostics and auxiliary statistical functions are delegated to the ArviZ libra
 purpose library for "exploratory analysis of Bayesian models."
 See https://arviz-devs.github.io/arviz/ for details.
 """
+
 import sys
 
 import arviz as az
@@ -27,5 +28,6 @@ for attr in az.stats.__all__:
     if not attr.startswith("__"):
         setattr(sys.modules[__name__], attr, obj)
 
+from pymc.stats.log_density import compute_log_likelihood, compute_log_prior
 
-__all__ = tuple(az.stats.__all__)
+__all__ = ("compute_log_likelihood", "compute_log_prior", *az.stats.__all__)

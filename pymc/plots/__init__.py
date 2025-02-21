@@ -1,4 +1,4 @@
-#   Copyright 2021 The PyMC Developers
+#   Copyright 2024 - present The PyMC Developers
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ Plots are delegated to the ArviZ library, a general purpose library for
 "exploratory analysis of Bayesian models."
 See https://arviz-devs.github.io/arviz/ for details on plots.
 """
+
 import functools
 import sys
 import warnings
@@ -56,7 +57,8 @@ traceplot = alias_deprecation(az.plot_trace, alias="traceplot")
 compareplot = alias_deprecation(az.plot_compare, alias="compareplot")
 
 
-__all__ = tuple(az.plots.__all__) + (
+__all__ = (
+    *az.plots.__all__,
     "autocorrplot",
     "compareplot",
     "forestplot",

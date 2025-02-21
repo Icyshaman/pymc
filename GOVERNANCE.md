@@ -161,40 +161,7 @@ nomination at the earliest. The nomination process is explained below
 in more detail in a section of its own.
 
 ### Current Core Contributors
-Contributors who are also part of a dedicated team or are institutional
-contributors will have so indicated after their name.
-
-Dedicated teams only cover a small part of the work needed to
-get the project going, tasks like fundraising, outreach or marketing
-for example don't (yet) have a dedicated team.
-Contributors don't need to be part of any dedicated team.
-
-* Adrian Seyboldt (dev - PyMC Labs)
-* Alex Andorra (dev - PyMC Labs)
-* Austin Rochford
-* Benjamin Vincent (docs - PyMC Labs)
-* Bill Engels (dev)
-* Brandon T. Willard (dev)
-* Chris Fonnesbeck (dev, docs)
-* Christian Luhmann (community)
-* Colin Carroll (dev)
-* Eelke Spaak (dev)
-* Eric Ma (dev - PyMC Labs)
-* George Ho (dev)
-* Junpeng Lao (dev, community)
-* Luciano Paz (dev - PyMC Labs)
-* Martina Cantaro (docs)
-* Maxim Kochurov (dev - PyMC Labs)
-* Meenal Jhajharia (docs, community)
-* Michael Osthege (dev)
-* Oriol Abril-Pla (docs, community)
-* Osvaldo Martin (dev, docs)
-* Ravin Kumar (dev, community, docs)
-* Reshama Shaikh (community - PyMC Labs)
-* Ricardo Vieira (dev, community)
-* Robert P. Goldman (dev)
-* Sayam Kumar (dev, docs)
-* Thomas Wiecki (dev, community - PyMC Labs)
+The list of current core contributors is available at https://github.com/orgs/pymc-devs/teams/core-contributors
 
 ## Steering Council
 
@@ -238,11 +205,10 @@ In particular, the Council may:
 
 The current Steering Council membership comprises:
 
-- Chris Fonnesbeck (dev, docs)
-- Junpeng Lao (dev, community)
-- Oriol Abril-Pla (docs, community)
-- Ravin Kumar (dev, community, docs)
-- Thomas Wiecki (dev, community - PyMC Labs)
+- Ricardo Vieira (dev, community - PyMC Labs)
+- Colin Carroll (dev)
+- Osvaldo Martin (dev, docs)
+- Jesse Grabowski (community, dev - PyMC Labs)
 
 Note that as explained in the [community architecture section](#community-and-team-architecture)
 and as indicated again in the description of the Steering Council above,
@@ -320,38 +286,6 @@ disagrees with the delegate's decision and no resolution is possible within the
 subcommittee. This is a different situation from a BDFL delegate for a specific
 decision, or a recusal situation, in which the BDFL gives up their authority
 to someone else in full.
-
-### NumFOCUS Subcommittee
-
-The Council will maintain one narrowly focused subcommittee to manage its
-interactions with NumFOCUS.
-
-- The NumFOCUS Subcommittee is comprised of 5 persons who manage project
-  funding that comes through NumFOCUS. It is expected that these funds will
-  be spent in a manner that is consistent with the non-profit mission of
-  NumFOCUS and the direction of the Project as determined by the full
-  Council.
-- This Subcommittee shall NOT make decisions about the direction, scope,
-  technical or financial direction of the Project.
-
-#### NumFOCUS subcommittee membership
-This Subcommittee will have 5 members. With at least
-2 members being on the Steering Council. No more
-than 2 Subcommitee Members can report to one person or company through
-employment or contracting work (including the reportee, i.e.
-the reportee + 1 is the max).
-This avoids effective majorities resting on one person.
-
-Any Core Contributor is eligible for the NumFOCUS subcommittee.
-
-#### Current NumFOCUS Subcommitee
-The current NumFOCUS Subcommittee consists of:
-
-- Peadar Coyle
-- Chris Fonnesbeck
-- John Salvatier
-- Jon Sedar
-- Thomas Wiecki
 
 ## BDFL
 
@@ -548,9 +482,9 @@ The log of past election processes is kept on [Discourse](https://discourse.pymc
   the membership constraints were not met,
   candidates are ranked by interpreting yes=+1, abstain=0 and no=-1.
   * If too many candidates were confirmed,
-    the {max_range} number of candidates with higher rank are elected.
+    the max number of candidates (7) with higher rank are elected.
   * If not enough candidates were chosen,
-    the {min_range} number of candidates with higher rank are elected.
+    the min number of candidates (4) with higher rank are elected.
   * If membership constraints were not met, candidates are selected
     progressively by rank if they meet the membership requirements.
     If for example out of 7 candidates for the NumFOCUS subcommittee
@@ -617,7 +551,7 @@ For current members of the documentation team, refer to the recurrent and
 core contributor membership sections.
 
 ### Community team
-The focus of the Community team is activities intended to nurture, energize, and grow the community of PyMC users and contributors.  These activities include moderation of and participation in the discussions on the PyMC Discourse, planning and organization of events such as PyMCon and sprints, and coordination of presence on various social networks.  These activites are not intended to be the sole responsibility of the Community team.  Instead, the Community team provides leadership in these efforts, but recruits other contributors and community members as needed, thus encourging participation and fostering a healthy, self-sustaining community.
+The focus of the Community team is activities intended to nurture, energize, and grow the community of PyMC users and contributors.  These activities include moderation of and participation in the discussions on the PyMC Discourse, planning and organization of events such as PyMCon and sprints, and coordination of presence on various social networks.  These activities are not intended to be the sole responsibility of the Community team.  Instead, the Community team provides leadership in these efforts, but recruits other contributors and community members as needed, thus encourging participation and fostering a healthy, self-sustaining community.
 
 For current members of the community team, refer to the recurrent and
 core contributor membership sections.
@@ -653,6 +587,12 @@ Team:
 In addition, Council members are given administrative rights to all repositories within
 the [pymc-devs](https://github.com/pymc-devs) organization.
 
+##### Communication Focused Repositories
+Some repositories on Github may be used primarily for internal knowledge store and communication, rather than content that is curated, published, or released _by the project_ for external users.
+
+The permissions of such repositories will be set in order to allow the same participation and access levels we use on private project communication channels like Slack.
+Therefore, similarly to Slack, these repositories will be private and write permissions will be given to all recurrent contributors (that is, anyone with access to Slack).
+
 #### Discourse
 Similar to the above section, Discourse permissions are also mapped to the community team
 and the two contributor roles.
@@ -665,12 +605,18 @@ Role:
   [Community Team](https://discourse.pymc.io/g/Community_Team) group.
 
 #### Accounts and services ownership and administration
-The PyMC Project also has accounts and hosts services on several platforms
-such as GitHub, Discourse, Twitter, ReadTheDocs, and Medium.
+The PyMC Project also has accounts and hosts services on several platforms.
+Some examples of such platforms include (but are not limited to)
+GitHub, Discourse, PyPI, Discord, Twitter, ReadTheDocs, or Medium.
+Any service under the PyMC project should follow these rules,
+even if not explicitly listed above as an example.
 
 If possible, all Council Members and relevant Core Contributors should have
-administrative rights on those platforms.
-If this is not possible, administrative rights should be distributed among
+administrative rights on those platforms. [SPEC 6](https://scientific-python.org/specs/spec-0006/)
+from the scientific python project has some recommendations on shared
+infrastructure and credentials.
+
+If none of the above were possible, administrative rights should be distributed among
 Council Members and relevant Core Contributors and establish a rotation
 of the administrative rights every 1-2 years.
 
@@ -710,7 +656,7 @@ provide examples on how to assign permissions:
   * Added to the PyMC_core Discourse group
   * Added to all private communication channels
   * Triage permissions on all repositories
-  * Access to PyMC gmail, drive and grant application platforms (i.e. CZI slack) as they are the main grant writing coordinator
+  * Access to PyMC Gmail, Drive and grant application platforms (i.e. CZI Slack) as they are the main grant writing coordinator
 
 </details>
 
@@ -812,6 +758,7 @@ extra benefits but those will be related to the conference, not the Project.
 
 * Agustina Arroyuelo (GSoC 2018)
 * Anand Patil
+* Brandon T. Willard
 * David Huard
 * Demetri Pananos (GSoC 2019)
 * John Salvatier

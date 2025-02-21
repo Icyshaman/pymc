@@ -1,4 +1,4 @@
-#   Copyright 2020 The PyMC Developers
+#   Copyright 2024 - present The PyMC Developers
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
@@ -13,12 +13,12 @@
 #   limitations under the License.
 
 __all__ = [
-    "SamplingError",
-    "IncorrectArgumentsError",
-    "TraceDirectoryError",
     "ImputationWarning",
-    "ShapeWarning",
+    "IncorrectArgumentsError",
+    "SamplingError",
     "ShapeError",
+    "ShapeWarning",
+    "TraceDirectoryError",
 ]
 
 
@@ -31,7 +31,7 @@ class IncorrectArgumentsError(ValueError):
 
 
 class TraceDirectoryError(ValueError):
-    """Error from trying to load a trace from an incorrectly-structured directory,"""
+    """Error from trying to load a trace from an incorrectly-structured directory."""
 
     pass
 
@@ -74,3 +74,19 @@ class DtypeError(TypeError):
             super().__init__(f"{message} (expected {expected})")
         else:
             super().__init__(message)
+
+
+class TruncationError(RuntimeError):
+    """Exception for errors generated from truncated graphs."""
+
+
+class NotConstantValueError(ValueError):
+    pass
+
+
+class BlockModelAccessError(RuntimeError):
+    pass
+
+
+class UndefinedMomentException(Exception):
+    pass

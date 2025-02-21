@@ -1,4 +1,4 @@
-#   Copyright 2020 The PyMC Developers
+#   Copyright 2024 - present The PyMC Developers
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
@@ -12,32 +12,36 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-import sys
 import warnings
 
 from functools import partial, reduce
 
-import aesara
-import aesara.sparse
-import aesara.tensor as at
-import aesara.tensor.slinalg  # pylint: disable=unused-import
 import numpy as np
-import scipy as sp
-import scipy.sparse  # pylint: disable=unused-import
+import pytensor
+import pytensor.sparse
+import pytensor.tensor as pt
+import pytensor.tensor.slinalg
 
-from aesara.graph.basic import Apply
-from aesara.graph.op import Op
-
-# pylint: disable=unused-import
-from aesara.tensor import (
-    abs_,
+from pytensor.graph.basic import Apply
+from pytensor.graph.op import Op
+from pytensor.tensor import (
+    abs,
     and_,
+    arccos,
+    arccosh,
+    arcsin,
+    arcsinh,
+    arctan,
+    arctanh,
+    broadcast_to,
     ceil,
     clip,
     concatenate,
     constant,
     cos,
     cosh,
+    cumprod,
+    cumsum,
     dot,
     eq,
     erf,
@@ -47,6 +51,8 @@ from aesara.tensor import (
     exp,
     flatten,
     floor,
+    full,
+    full_like,
     ge,
     gt,
     le,
@@ -55,12 +61,18 @@ from aesara.tensor import (
     logaddexp,
     logsumexp,
     lt,
+    matmul,
+    max,
     maximum,
+    mean,
+    min,
     minimum,
     neq,
+    ones,
     ones_like,
     or_,
     prod,
+    round,
     sgn,
     sigmoid,
     sin,
@@ -73,31 +85,36 @@ from aesara.tensor import (
     tan,
     tanh,
     where,
+    zeros,
     zeros_like,
 )
+from pytensor.tensor.linalg import solve_triangular
+from pytensor.tensor.nlinalg import matrix_inverse
+from pytensor.tensor.special import log_softmax, softmax
 
-try:
-    from aesara.tensor.basic import extract_diag
-except ImportError:
-    from aesara.tensor.nlinalg import extract_diag
-
-
-from aesara.tensor.nlinalg import det, matrix_dot, matrix_inverse, trace
-from scipy.linalg import block_diag as scipy_block_diag
-
-from pymc.aesaraf import floatX, ix_, largest_common_dtype
-
-# pylint: enable=unused-import
+from pymc.pytensorf import floatX
 
 __all__ = [
-    "abs_",
+    "abs",
     "and_",
+    "arccos",
+    "arccosh",
+    "arcsin",
+    "arcsinh",
+    "arctan",
+    "arctanh",
+    "batched_diag",
+    "block_diagonal",
+    "broadcast_to",
+    "cartesian",
     "ceil",
     "clip",
     "concatenate",
     "constant",
     "cos",
     "cosh",
+    "cumprod",
+    "cumsum",
     "dot",
     "eq",
     "erf",
@@ -105,26 +122,53 @@ __all__ = [
     "erfcinv",
     "erfinv",
     "exp",
+    "expand_packed_triangular",
+    "flat_outer",
     "flatten",
+    "flatten_list",
     "floor",
+    "full",
+    "full_like",
     "ge",
     "gt",
+    "invlogit",
+    "invprobit",
+    "kron_diag",
+    "kron_dot",
+    "kron_solve_lower",
+    "kron_solve_upper",
+    "kronecker",
     "le",
     "log",
+    "log1mexp",
     "log1pexp",
+    "log_softmax",
     "logaddexp",
+    "logbern",
+    "logdet",
+    "logdiffexp",
+    "logit",
     "logsumexp",
     "lt",
+    "matmul",
+    "max",
     "maximum",
+    "mean",
+    "min",
     "minimum",
     "neq",
+    "ones",
     "ones_like",
     "or_",
+    "probit",
     "prod",
+    "round",
+    "round",
     "sgn",
     "sigmoid",
     "sin",
     "sinh",
+    "softmax",
     "sqr",
     "sqrt",
     "stack",
@@ -133,34 +177,15 @@ __all__ = [
     "tan",
     "tanh",
     "where",
+    "zeros",
     "zeros_like",
-    "kronecker",
-    "cartesian",
-    "kron_dot",
-    "kron_solve_lower",
-    "kron_solve_upper",
-    "kron_diag",
-    "flat_outer",
-    "logdiffexp",
-    "invlogit",
-    "softmax",
-    "log_softmax",
-    "logbern",
-    "logit",
-    "log1mexp",
-    "flatten_list",
-    "logdet",
-    "probit",
-    "invprobit",
-    "expand_packed_triangular",
-    "batched_diag",
-    "block_diagonal",
 ]
 
 
 def kronecker(*Ks):
-    r"""Return the Kronecker product of arguments:
-          :math:`K_1 \otimes K_2 \otimes ... \otimes K_D`
+    r"""Return the Kronecker product of arguments.
+
+    math:`K_1 \otimes K_2 \otimes ... \otimes K_D`
 
     Parameters
     ----------
@@ -172,11 +197,11 @@ def kronecker(*Ks):
     np.ndarray :
         Block matrix Kroncker product of the argument matrices.
     """
-    return reduce(at.slinalg.kron, Ks)
+    return reduce(pt.slinalg.kron, Ks)
 
 
 def cartesian(*arrays):
-    """Makes the Cartesian product of arrays.
+    """Make the Cartesian product of arrays.
 
     Parameters
     ----------
@@ -194,10 +219,10 @@ def cartesian(*arrays):
 
 
 def kron_matrix_op(krons, m, op):
-    r"""Apply op to krons and m in a way that reproduces ``op(kronecker(*krons), m)``
+    r"""Apply op to krons and m in a way that reproduces ``op(kronecker(*krons), m)``.
 
     Parameters
-    -----------
+    ----------
     krons : list of square 2D array-like objects
         D square matrices :math:`[A_1, A_2, ..., A_D]` to be Kronecker'ed
         :math:`A = A_1 \otimes A_2 \otimes ... \otimes A_D`
@@ -225,21 +250,21 @@ def kron_matrix_op(krons, m, op):
         raise ValueError(f"m must have ndim <= 2, not {m.ndim}")
     result = kron_vector_op(m)
     result_shape = result.shape
-    return at.reshape(result, (result_shape[1], result_shape[0])).T
+    return pt.reshape(result, (result_shape[1], result_shape[0])).T
 
 
 # Define kronecker functions that work on 1D and 2D arrays
-kron_dot = partial(kron_matrix_op, op=at.dot)
-kron_solve_lower = partial(kron_matrix_op, op=at.slinalg.solve_lower_triangular)
-kron_solve_upper = partial(kron_matrix_op, op=at.slinalg.solve_upper_triangular)
+kron_dot = partial(kron_matrix_op, op=pt.dot)
+kron_solve_lower = partial(kron_matrix_op, op=partial(solve_triangular, lower=True))
+kron_solve_upper = partial(kron_matrix_op, op=partial(solve_triangular, lower=False))
 
 
 def flat_outer(a, b):
-    return at.outer(a, b).ravel()
+    return pt.outer(a, b).ravel()
 
 
 def kron_diag(*diags):
-    """Returns diagonal of a kronecker product.
+    """Return diagonal of a kronecker product.
 
     Parameters
     ----------
@@ -249,60 +274,32 @@ def kron_diag(*diags):
     return reduce(flat_outer, diags)
 
 
-def tround(*args, **kwargs):
-    """
-    Temporary function to silence round warning in Aesara. Please remove
-    when the warning disappears.
-    """
-    kwargs["mode"] = "half_to_even"
-    return at.round(*args, **kwargs)
-
-
 def logdiffexp(a, b):
-    """log(exp(a) - exp(b))"""
-    return a + at.log1mexp(b - a)
+    """Return log(exp(a) - exp(b))."""
+    return a + pt.log1mexp(b - a)
 
 
 def logdiffexp_numpy(a, b):
-    """log(exp(a) - exp(b))"""
+    """Return log(exp(a) - exp(b))."""
+    warnings.warn(
+        "pymc.math.logdiffexp_numpy is being deprecated.",
+        FutureWarning,
+        stacklevel=2,
+    )
     return a + log1mexp_numpy(b - a, negative_input=True)
 
 
-def invlogit(x, eps=None):
-    """The inverse of the logit function, 1 / (1 + exp(-x))."""
-    if eps is not None:
-        warnings.warn(
-            "pymc.math.invlogit no longer supports the ``eps`` argument and it will be ignored.",
-            FutureWarning,
-            stacklevel=2,
-        )
-    return at.sigmoid(x)
+invlogit = sigmoid
 
 
-def softmax(x, axis=None):
-    # Ignore vector case UserWarning issued by Aesara. This can be removed once Aesara
-    # drops that warning
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)
-        return at.nnet.softmax(x, axis=axis)
-
-
-def log_softmax(x, axis=None):
-    # Ignore vector case UserWarning issued by Aesara. This can be removed once Aesara
-    # drops that warning
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)
-        return at.nnet.logsoftmax(x, axis=axis)
-
-
-def logbern(log_p):
+def logbern(log_p, rng=None):
     if np.isnan(log_p):
         raise FloatingPointError("log_p can't be nan.")
-    return np.log(np.random.uniform()) < log_p
+    return np.log((rng or np.random).uniform()) < log_p
 
 
 def logit(p):
-    return at.log(p / (floatX(1) - p))
+    return pt.log(p / (floatX(1) - p))
 
 
 def log1mexp(x, *, negative_input=False):
@@ -328,15 +325,22 @@ def log1mexp(x, *, negative_input=False):
         )
         x = -x
 
-    return at.log1mexp(x)
+    return pt.log1mexp(x)
 
 
 def log1mexp_numpy(x, *, negative_input=False):
     """Return log(1 - exp(x)).
+
     This function is numerically more stable than the naive approach.
+
     For details, see
     https://cran.r-project.org/web/packages/Rmpfr/vignettes/log1mexp-note.pdf
     """
+    warnings.warn(
+        "pymc.math.log1mexp_numpy is being deprecated.",
+        FutureWarning,
+        stacklevel=2,
+    )
     x = np.asarray(x, dtype="float")
 
     if not negative_input:
@@ -357,13 +361,13 @@ def log1mexp_numpy(x, *, negative_input=False):
 
 
 def flatten_list(tensors):
-    return at.concatenate([var.ravel() for var in tensors])
+    return pt.concatenate([var.ravel() for var in tensors])
 
 
 class LogDet(Op):
-    r"""Compute the logarithm of the absolute determinant of a square
-    matrix M, log(abs(det(M))) on the CPU. Avoids det(M) overflow/
-    underflow.
+    r"""Compute the logarithm of the absolute determinant of a square matrix M, log(abs(det(M))) on the CPU.
+
+    Avoids det(M) overflow/underflow.
 
     Notes
     -----
@@ -372,8 +376,8 @@ class LogDet(Op):
     """
 
     def make_node(self, x):
-        x = aesara.tensor.as_tensor_variable(x)
-        o = aesara.tensor.scalar(dtype=x.dtype)
+        x = pytensor.tensor.as_tensor_variable(x)
+        o = pytensor.tensor.scalar(dtype=x.dtype)
         return Apply(self, [x], [o])
 
     def perform(self, node, inputs, outputs, params=None):
@@ -384,8 +388,7 @@ class LogDet(Op):
             log_det = np.sum(np.log(np.abs(s)))
             z[0] = np.asarray(log_det, dtype=x.dtype)
         except Exception:
-            print(f"Failed to compute logdet of {x}.", file=sys.stdout)
-            raise
+            raise ValueError(f"Failed to compute logdet of {x}.")
 
     def grad(self, inputs, g_outputs):
         [gz] = g_outputs
@@ -423,7 +426,7 @@ def expand_packed_triangular(n, packed, lower=True, diagonal_only=False):
     ----------
     n: int
         The number of rows of the triangular matrix.
-    packed: aesara.vector
+    packed: pytensor.vector
         The matrix in packed format.
     lower: bool, default=True
         If true, assume that the matrix is lower triangular.
@@ -442,28 +445,32 @@ def expand_packed_triangular(n, packed, lower=True, diagonal_only=False):
         diag_idxs = np.arange(2, n + 2)[::-1].cumsum() - n - 1
         return packed[diag_idxs]
     elif lower:
-        out = at.zeros((n, n), dtype=aesara.config.floatX)
+        out = pt.zeros((n, n), dtype=pytensor.config.floatX)
         idxs = np.tril_indices(n)
-        return at.set_subtensor(out[idxs], packed)
+        # tag as lower triangular to enable pytensor rewrites
+        out = pt.set_subtensor(out[idxs], packed)
+        out.tag.lower_triangular = True
+        return out
     elif not lower:
-        out = at.zeros((n, n), dtype=aesara.config.floatX)
+        out = pt.zeros((n, n), dtype=pytensor.config.floatX)
         idxs = np.triu_indices(n)
-        return at.set_subtensor(out[idxs], packed)
+        # tag as upper triangular to enable pytensor rewrites
+        out = pt.set_subtensor(out[idxs], packed)
+        out.tag.upper_triangular = True
+        return out
 
 
 class BatchedDiag(Op):
-    """
-    Fast BatchedDiag allocation
-    """
+    """Fast BatchedDiag allocation."""
 
     __props__ = ()
 
     def make_node(self, diag):
-        diag = at.as_tensor_variable(diag)
+        diag = pt.as_tensor_variable(diag)
         if diag.type.ndim != 2:
             raise TypeError("data argument must be a matrix", diag.type)
 
-        return Apply(self, [diag], [at.tensor3(dtype=diag.dtype)])
+        return Apply(self, [diag], [pt.tensor3(dtype=diag.dtype)])
 
     def perform(self, node, ins, outs, params=None):
         (C,) = ins
@@ -479,7 +486,7 @@ class BatchedDiag(Op):
 
     def grad(self, inputs, gout):
         (gz,) = gout
-        idx = at.arange(gz.shape[-1])
+        idx = pt.arange(gz.shape[-1])
         return [gz[..., idx, idx]]
 
     def infer_shape(self, fgraph, nodes, shapes):
@@ -487,68 +494,21 @@ class BatchedDiag(Op):
 
 
 def batched_diag(C):
-    C = at.as_tensor(C)
+    C = pt.as_tensor(C)
     dim = C.shape[-1]
     if C.ndim == 2:
         # diag -> matrices
         return BatchedDiag()(C)
     elif C.ndim == 3:
         # matrices -> diag
-        idx = at.arange(dim)
+        idx = pt.arange(dim)
         return C[..., idx, idx]
     else:
         raise ValueError("Input should be 2 or 3 dimensional")
 
 
-class BlockDiagonalMatrix(Op):
-    __props__ = ("sparse", "format")
-
-    def __init__(self, sparse=False, format="csr"):
-        if format not in ("csr", "csc"):
-            raise ValueError(f"format must be one of: 'csr', 'csc', got {format}")
-        self.sparse = sparse
-        self.format = format
-
-    def make_node(self, *matrices):
-        if not matrices:
-            raise ValueError("no matrices to allocate")
-        matrices = list(map(at.as_tensor, matrices))
-        if any(mat.type.ndim != 2 for mat in matrices):
-            raise TypeError("all data arguments must be matrices")
-        if self.sparse:
-            out_type = aesara.sparse.matrix(self.format, dtype=largest_common_dtype(matrices))
-        else:
-            out_type = aesara.tensor.matrix(dtype=largest_common_dtype(matrices))
-        return Apply(self, matrices, [out_type])
-
-    def perform(self, node, inputs, output_storage, params=None):
-        dtype = largest_common_dtype(inputs)
-        if self.sparse:
-            output_storage[0][0] = sp.sparse.block_diag(inputs, self.format, dtype)
-        else:
-            output_storage[0][0] = scipy_block_diag(*inputs).astype(dtype)
-
-    def grad(self, inputs, gout):
-        shapes = at.stack([i.shape for i in inputs])
-        index_end = shapes.cumsum(0)
-        index_begin = index_end - shapes
-        slices = [
-            ix_(
-                at.arange(index_begin[i, 0], index_end[i, 0]),
-                at.arange(index_begin[i, 1], index_end[i, 1]),
-            )
-            for i in range(len(inputs))
-        ]
-        return [gout[0][slc] for slc in slices]
-
-    def infer_shape(self, fgraph, nodes, shapes):
-        first, second = zip(*shapes)
-        return [(at.add(*first), at.add(*second))]
-
-
 def block_diagonal(matrices, sparse=False, format="csr"):
-    r"""See scipy.sparse.block_diag or
-    scipy.linalg.block_diag for reference
+    r"""See pt.slinalg.block_diag or pytensor.sparse.basic.block_diag for reference.
 
     Parameters
     ----------
@@ -562,6 +522,12 @@ def block_diagonal(matrices, sparse=False, format="csr"):
     -------
     matrix
     """
+    warnings.warn(
+        "pymc.math.block_diagonal is deprecated in favor of `pytensor.tensor.linalg.block_diag` and `pytensor.sparse.block_diag` functions. This function will be removed in a future release",
+    )
     if len(matrices) == 1:  # graph optimization
         return matrices[0]
-    return BlockDiagonalMatrix(sparse=sparse, format=format)(*matrices)
+    if sparse:
+        return pytensor.sparse.basic.block_diag(*matrices, format=format)
+    else:
+        return pt.slinalg.block_diag(*matrices)

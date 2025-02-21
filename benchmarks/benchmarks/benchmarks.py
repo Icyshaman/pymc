@@ -1,4 +1,4 @@
-#   Copyright 2020 The PyMC Developers
+#   Copyright 2024 - present The PyMC Developers
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
@@ -14,20 +14,20 @@
 import time
 import timeit
 
-import aesara
-import aesara.tensor as at
 import arviz as az
 import numpy as np
 import pandas as pd
+import pytensor
+import pytensor.tensor as pt
 
 import pymc as pm
 
 
 def glm_hierarchical_model(random_seed=123):
-    """Sample glm hierarchical model to use in benchmarks"""
+    """Sample glm hierarchical model to use in benchmarks."""
     np.random.seed(random_seed)
     data = pd.read_csv(pm.get_data("radon.csv"))
-    data["log_radon"] = data["log_radon"].astype(aesara.config.floatX)
+    data["log_radon"] = data["log_radon"].astype(pytensor.config.floatX)
     county_idx = data.county_code.values
 
     n_counties = len(data.county.unique())
@@ -47,7 +47,7 @@ def glm_hierarchical_model(random_seed=123):
 
 
 def mixture_model(random_seed=1234):
-    """Sample mixture model to use in benchmarks"""
+    """Sample mixture model to use in benchmarks."""
     np.random.seed(1234)
     size = 1000
     w_true = np.array([0.35, 0.4, 0.25])
@@ -61,8 +61,8 @@ def mixture_model(random_seed=1234):
         mu = pm.Normal("mu", mu=0.0, sigma=10.0, shape=w_true.shape)
         enforce_order = pm.Potential(
             "enforce_order",
-            at.switch(mu[0] - mu[1] <= 0, 0.0, -np.inf)
-            + at.switch(mu[1] - mu[2] <= 0, 0.0, -np.inf),
+            pt.switch(mu[0] - mu[1] <= 0, 0.0, -np.inf)
+            + pt.switch(mu[1] - mu[2] <= 0, 0.0, -np.inf),
         )
         tau = pm.Gamma("tau", alpha=1.0, beta=1.0, shape=w_true.shape)
         pm.NormalMixture("x_obs", w=w, mu=mu, tau=tau, observed=x)
@@ -77,10 +77,7 @@ def mixture_model(random_seed=1234):
 
 
 class OverheadSuite:
-    """
-    Just tests how long sampling from a normal distribution takes for various
-    samplers
-    """
+    """Test how long sampling from a normal distribution takes for various samplers."""
 
     params = [pm.NUTS, pm.HamiltonianMC, pm.Metropolis, pm.Slice]
     timer = timeit.default_timer
@@ -161,7 +158,7 @@ class ExampleSuite:
 
 
 class NUTSInitSuite:
-    """Tests initializations for NUTS sampler on models"""
+    """Tests initializations for NUTS sampler on models."""
 
     timeout = 360.0
     params = ("adapt_diag", "jitter+adapt_diag", "jitter+adapt_full", "adapt_full")
@@ -174,13 +171,16 @@ class NUTSInitSuite:
         """How long does it take to run the initialization."""
         with glm_hierarchical_model():
             pm.init_nuts(
-                init=init, chains=self.chains, progressbar=False, seeds=np.arange(self.chains)
+                init=init,
+                chains=self.chains,
+                progressbar=False,
+                random_seed=np.arange(self.chains),
             )
 
     def track_glm_hierarchical_ess(self, init):
         with glm_hierarchical_model():
             start, step = pm.init_nuts(
-                init=init, chains=self.chains, progressbar=False, seeds=np.arange(self.chains)
+                init=init, chains=self.chains, progressbar=False, random_seed=np.arange(self.chains)
             )
             t0 = time.time()
             idata = pm.sample(
@@ -201,9 +201,9 @@ class NUTSInitSuite:
         model, start = mixture_model()
         with model:
             _, step = pm.init_nuts(
-                init=init, chains=self.chains, progressbar=False, seeds=np.arange(self.chains)
+                init=init, chains=self.chains, progressbar=False, random_seed=np.arange(self.chains)
             )
-            start = [{k: v for k, v in start.items()} for _ in range(self.chains)]
+            start = [dict(start) for _ in range(self.chains)]
             t0 = time.time()
             idata = pm.sample(
                 draws=self.draws,
