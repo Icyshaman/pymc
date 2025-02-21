@@ -10,3 +10,8 @@ projects:
       - test
       - alpha
     lastUpdated: 1740134417514
+  Test Beta:
+    description: Test Beta
+    tags:
+      - Beta
+    lastUpdated: 1740139806497
