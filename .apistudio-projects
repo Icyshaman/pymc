@@ -1,9 +1,4 @@
 projects:
-  Test:
-    description: Test project
-    tags:
-      - test
-    lastUpdated: 1740133043128
   TestAlpha:
     description: Test project
     tags:
