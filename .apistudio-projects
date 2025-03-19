@@ -1,1 +1,6 @@
-projects: {}
+projects:
+  test:
+    description: test
+    tags:
+      - test
+    lastUpdated: 1742381411261
