@@ -1,0 +1,21 @@
+#
+# Copyright Super iPaaS Integration LLC, an IBM Company 2024
+#
+kind: HTTPEndpoint
+apiVersion: api.webmethods.io/beta
+metadata:
+  name: endpoint
+  version: 1.0
+  namespace: dev
+spec:
+  url: http://petstore.swagger.io
+  method: GET
+  connectTimeout: 300
+  readTimeout: 200
+  sslConfig:
+    keyStoreAlias: ""
+    keyAlias: ""
+    truststoreAlias: ""
+  serviceRegistryParameters:
+    - name: ""
+      value: ""
