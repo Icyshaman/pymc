@@ -1,0 +1,21 @@
+#
+# Copyright Super iPaaS Integration LLC, an IBM Company 2024
+#
+kind: assertion
+apiVersion: api.webmethods.io/beta
+metadata:
+  name: basicassert
+  version: alpha
+  namespace: dev
+  tags:
+    - test
+    - APISample
+spec:
+  - name: "Validate the response status"
+    key: "code"
+    value: 200
+    action: "equals" 
+  - name: "Less Than the response Time"
+    key: "responseTime"
+    value: 1000
+    action: "lessThan"
